@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Detector de Placas Vehiculares (Cámara)</title>
     <style>
-        /* --- Estilos CSS (adaptados y simplificados para brevedad) --- */
+        /* --- Estilos CSS (sin cambios) --- */
         body {
             font-family: Arial, sans-serif; max-width: 900px; margin: 0 auto;
             padding: 20px; background-color: #f9f9f9;
@@ -19,19 +19,27 @@
             display: flex; flex-wrap: wrap; gap: 15px; margin-bottom: 20px;
             align-items: center; border-bottom: 1px solid #eee; padding-bottom: 20px;
         }
-        .video-container { /* Para el canvas del video procesado */
+        .video-container {
             border: 1px solid #ddd; padding: 15px; border-radius: 5px; background-color: #fdfdfd;
             min-height: 300px; display: flex; flex-direction: column; align-items: center;
+            position: relative; /* Para superponer el canvas */
         }
         .video-container h3 { margin-top: 0; margin-bottom: 10px; color: #555; text-align: center; }
-        #processedCanvas { /* Canvas para video y detecciones */
-            max-width: 100%; max-height: 500px; height: auto; display: block;
-            border: 1px dashed #ccc; background-color: #333; /* Fondo oscuro mientras carga */
+
+        #videoFeed {
+            display: block; /* Video visible */
+            width: 100%;
+            max-width: 640px; /* O el tamaño que desees */
+            height: auto;
+            border: 1px solid #888;
         }
-        #videoFeed { /* Elemento de video, puede estar oculto */
-            display: none; /* Lo dibujaremos en el canvas */
-            width: 640px; /* Ancho base, se ajustará */
-            height: 480px; /* Alto base, se ajustará */
+        #processedCanvas { /* Canvas para DIBUJAR bounding boxes */
+            position: absolute;
+            top: 0; /* Ajustar según el padding del video-container y el h3 */
+            left: 0; /* Ajustar si hay márgenes */
+            width: 100%; /* Se ajustará con JS */
+            height: 100%; /* Se ajustará con JS */
+            pointer-events: none; /* Para que no interfiera con el video si está encima */
         }
         .results {
             margin-top: 20px; padding: 15px; background-color: #f0f0f0; border-radius: 5px;
@@ -63,7 +71,7 @@
             margin-top: 10px; text-align: center; color: #666;
             min-height: 20px; font-style: italic;
         }
-        .coep-info { /* Estilo para la nota COEP/COOP */
+        .coep-info {
             padding:10px; margin-bottom:15px; background-color: #fff3cd; border: 1px solid #ffeeba;
             color: #856404; border-radius: 4px; text-align: center; font-size: 0.9em;
         }
@@ -76,11 +84,10 @@
     <h1>Detector de Placas Vehiculares (Cámara)</h1>
 
     <div class="coep-info">
-        <strong>Nota Importante:</strong> Para un rendimiento óptimo (multithreading) y para evitar problemas con `SharedArrayBuffer`, esta página debe servirse con cabeceras COOP y COEP.
-        Si ves advertencias en la consola sobre `SharedArrayBuffer` o `crossOriginIsolated`, configura tu servidor para enviar:
+        <strong>Nota Importante:</strong> Para un rendimiento óptimo (multithreading con Web Workers y SharedArrayBuffer para ONNX Runtime), esta página debe servirse con cabeceras COOP y COEP.
         <br><code>Cross-Origin-Opener-Policy: same-origin</code>
-        <br><code>Cross-Origin-Embedder-Policy: require-corp</code> (o <code>credentialless</code>)
-        <br>Usar "Live Server" en VSCode es una forma fácil de lograrlo.
+        <br><code>Cross-Origin-Embedder-Policy: require-corp</code> (o <code>credentialless</code> para mayor compatibilidad si los scripts de terceros lo permiten)
+        <br>Usar "Live Server" en VSCode con un archivo `server.js` (o similar) que añada estas cabeceras es una forma de lograrlo.
         <br><a href="https://web.dev/coop-coep/" target="_blank" rel="noopener noreferrer">Más información aquí</a>.
     </div>
 
@@ -100,32 +107,32 @@
         <div id="status" class="status">Selecciona un modelo y presiona "Iniciar Cámara".</div>
 
         <div class="video-container">
-            <h3>Video Procesado</h3>
-            <video id="videoFeed" playsinline></video> <canvas id="processedCanvas"></canvas>
-        </div>
+            <h3>Video</h3> <video id="videoFeed" playsinline autoplay muted></video> <canvas id="processedCanvas"></canvas> </div>
 
         <div class="results" id="resultsArea"></div>
     </div>
 
-    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/ort.min.js"></script>
-    <script src="https://docs.opencv.org/4.10.0/opencv.js"></script>
- <script type="module">
-        // Asegúrate que la ruta a tu librería ALPR es correcta
-        import { ALPR } from './fastalprjs/src/alpr.js';
+    <script type="module">
+        // No se importa ALPR aquí, se usa en el worker.
 
-        // Configuración de ONNX Runtime Web para hilos (si COOP/COEP están activados)
+        // Configuración de ONNX Runtime Web para el HILO PRINCIPAL (si se usara aquí)
+        // Esto es menos relevante ahora que la inferencia está en el worker.
+        /*
         try {
-            if (self.crossOriginIsolated) {
-                ort.env.wasm.numThreads = Math.max(1, Math.min(navigator.hardwareConcurrency || 4, 4));
-                console.info(`ONNX Runtime Web: Usando ${ort.env.wasm.numThreads} hilos (crossOriginIsolated: true).`);
-            } else {
-                ort.env.wasm.numThreads = 1; // Fallback a 1 hilo si no está aislado
-                console.warn('ONNX Runtime Web: crossOriginIsolated es false. SharedArrayBuffer no disponible. Usando 1 hilo. Sirve la página con cabeceras COOP/COEP para habilitar multithreading.');
+            if (typeof ort !== 'undefined') { // Solo si ort está cargado en el hilo principal
+                if (self.crossOriginIsolated) {
+                    ort.env.wasm.numThreads = Math.max(1, Math.min(navigator.hardwareConcurrency || 4, 4));
+                    console.info(`ONNX Runtime (Main Thread): Usando ${ort.env.wasm.numThreads} hilos.`);
+                } else {
+                    ort.env.wasm.numThreads = 1;
+                    console.warn('ONNX Runtime (Main Thread): crossOriginIsolated es false. Usando 1 hilo.');
+                }
+                ort.env.wasm.simd = true;
             }
-            ort.env.wasm.simd = true; // Habilitar SIMD
         } catch (e) {
-            console.error("Error configurando ONNX Runtime:", e);
+            console.error("Error configurando ONNX Runtime en hilo principal:", e);
         }
+        */
 
         document.addEventListener('DOMContentLoaded', () => {
             const modelSelect = document.getElementById('modelSelect');
@@ -133,19 +140,22 @@
             const loader = document.getElementById('loader');
             const statusDiv = document.getElementById('status');
             const videoElement = document.getElementById('videoFeed');
-            const processedCanvas = document.getElementById('processedCanvas');
+            const processedCanvas = document.getElementById('processedCanvas'); // Canvas para dibujar
             const resultsArea = document.getElementById('resultsArea');
             const canvasCtx = processedCanvas.getContext('2d');
 
-            let alprInstance = null;
+            let alprWorker = null;
+            let isWorkerInitialized = false;
             const ocrModelName = "global_mobile_vit_v2_ocr"; // Modelo OCR fijo
             let currentDetectorModelName = modelSelect.value;
             let isCameraRunning = false;
             let videoStream = null;
             let animationFrameId = null;
+            let frameCounter = 0; // Para rastrear frames enviados al worker
 
-            const TARGET_FPS_PROCESSING = 3; // FPS deseado para el procesamiento
+            const TARGET_FPS_PROCESSING = 5; // FPS deseado para el procesamiento en el worker
             let lastProcessTime = 0;
+            let processingFrameInWorker = false; // Flag para saber si el worker está ocupado
 
             function updateStatus(message, isError = false) {
                 statusDiv.textContent = message;
@@ -158,38 +168,155 @@
                 cameraButton.disabled = show;
             }
 
-            async function initializeAlprModel() {
-                if (alprInstance) {
-                    // Podrías añadir alprInstance.release() si tu librería lo soporta
-                    console.info("Re-inicializando instancia ALPR.");
-                }
+            async function initializeAlprWorker() {
                 showLoader(true);
-                updateStatus(`Inicializando ALPR: ${currentDetectorModelName}...`);
-                try {
-                    // Asumiendo que ALPR.js puede encontrar los modelos .onnx
-                    // en una ruta predefinida (ej. './models/') o que los nombres son suficientes.
-                    alprInstance = new ALPR({
+                currentDetectorModelName = modelSelect.value;
+                updateStatus(`Inicializando ALPR Worker con: ${currentDetectorModelName}...`);
+
+                if (alprWorker) {
+                    console.log("Terminando worker ALPR anterior...");
+                    alprWorker.terminate();
+                    alprWorker = null;
+                }
+                isWorkerInitialized = false;
+                // La ruta a alpr-worker.js debe ser correcta desde la raíz del servidor.
+                    alprWorker = new Worker('./alpr_worker.js', { type: 'module' });
+
+                alprWorker.onmessage = function (e) {
+                    const { type, success, error, results, frameId } = e.data;
+
+                    if (type === 'initComplete') {
+                        showLoader(false);
+                        if (success) {
+                            isWorkerInitialized = true;
+                            updateStatus(`ALPR Worker inicializado (${currentDetectorModelName}).`);
+                            if (isCameraRunning && !animationFrameId) { // Si la cámara se inició mientras el worker cargaba
+                                lastProcessTime = performance.now();
+                                animationFrameId = requestAnimationFrame(videoProcessingLoop);
+                            }
+                        } else {
+                            updateStatus(`Error al inicializar ALPR Worker: ${error || 'Desconocido'}`, true);
+                            alprWorker = null;
+                        }
+                    } else if (type === 'frameProcessed') {
+                        processingFrameInWorker = false; // Worker está libre
+                        // console.log(`Hilo Principal: Frame ${frameId} procesado.`);
+                        if (error) {
+                            console.error(`Error del Worker (frame ${frameId}):`, error);
+                        } else if (results) {
+                            // Dibujar resultados en el canvas superpuesto
+                            drawAlprResults(results, processedCanvas, canvasCtx, videoElement);
+
+                            if (results.length > 0) {
+                                let resultsTextContent = `Detecciones: ${results.length}\n\n`;
+                                results.forEach((item, index) => {
+                                    const det = item.detection;
+                                    const ocr = item.ocr;
+                                    const detConf = det && typeof det.confidence === 'number' ? (det.confidence * 100).toFixed(1) : "N/A";
+                                    const ocrText = ocr && ocr.text ? ocr.text : "N/A";
+                                    const ocrConf = ocr && typeof ocr.confidence === 'number' ? (ocr.confidence * 100).toFixed(1) : "N/A";
+                                    resultsTextContent += `Placa ${index + 1}: ${ocrText} (OCR:${ocrConf}%) (Det:${detConf}%)\n`;
+                                });
+                                resultsArea.textContent = resultsTextContent.trim();
+                            } else {
+                                // resultsArea.textContent = "No se encontraron placas.";
+                                // No limpiar las cajas viejas explícitamente aquí,
+                                // drawAlprResults se encarga de limpiar y redibujar.
+                                // Si no hay results, drawAlprResults simplemente limpia.
+                            }
+                        }
+                    } else if (type === 'initError') { // Manejar errores de inicialización del worker
+                        showLoader(false);
+                        updateStatus(`Error crítico inicializando Worker: ${error}`, true);
+                        alprWorker = null;
+                    }
+                };
+
+                alprWorker.onerror = function(err) {
+                    console.error("Error en ALPR Worker:", err.message, err);
+                    updateStatus(`Error fatal en ALPR Worker: ${err.message}`, true);
+                    showLoader(false);
+                    isWorkerInitialized = false;
+                    if (alprWorker) alprWorker.terminate();
+                    alprWorker = null;
+                };
+
+                console.log("Hilo Principal: Enviando mensaje 'init' al worker...");
+                alprWorker.postMessage({
+                    type: 'init',
+                    payload: {
                         detectorModel: currentDetectorModelName,
                         ocrModel: ocrModelName
-                        // Si ALPR.js necesita una ruta base: modelsBasePath: './models/'
-                    });
-                    // Si ALPR tiene un método init asíncrono: await alprInstance.init();
-                    updateStatus(`ALPR inicializado (${currentDetectorModelName}).`);
-                    return true;
-                } catch (error) {
-                    updateStatus(`Error al inicializar ALPR: ${error.message}`, true);
-                    alprInstance = null;
-                    return false;
-                } finally {
-                    showLoader(false);
+                    }
+                });
+            }
+
+            function drawAlprResults(alprResults, canvas, ctx, videoSourceElement) {
+                // Sincronizar tamaño del canvas con el del video actual
+                if (canvas.width !== videoSourceElement.videoWidth || canvas.height !== videoSourceElement.videoHeight) {
+                    canvas.width = videoSourceElement.videoWidth;
+                    canvas.height = videoSourceElement.videoHeight;
                 }
+                // Ajustar CSS para que el canvas se superponga correctamente
+                // Esto asume que videoElement es el referente para el tamaño del canvas.
+                const videoRect = videoSourceElement.getBoundingClientRect();
+                canvas.style.position = 'absolute';
+                canvas.style.left = videoSourceElement.offsetLeft + 'px';
+                canvas.style.top = videoSourceElement.offsetTop + 'px';
+                canvas.width = videoRect.width; // Usar dimensiones renderizadas
+                canvas.height = videoRect.height;
+
+
+                ctx.clearRect(0, 0, canvas.width, canvas.height); // Limpiar canvas antes de dibujar
+
+                if (!alprResults || alprResults.length === 0) return;
+
+                // Escalas para convertir coordenadas del frame original (videoWidth/videoHeight)
+                // al tamaño del canvas de dibujo (que ahora coincide con el video renderizado).
+                const scaleX = canvas.width / videoSourceElement.videoWidth;
+                const scaleY = canvas.height / videoSourceElement.videoHeight;
+
+                alprResults.forEach(item => {
+                    const { detection, ocr } = item;
+                    if (!detection || !detection.boundingBox) return;
+
+                    const bb = detection.boundingBox;
+                    const x1 = bb.x1 * scaleX;
+                    const y1 = bb.y1 * scaleY;
+                    const width = (bb.x2 - bb.x1) * scaleX;
+                    const height = (bb.y2 - bb.y1) * scaleY;
+
+                    ctx.strokeStyle = 'lime';
+                    ctx.lineWidth = Math.max(1, Math.min(2, canvas.width / 320)); // Grosor adaptativo
+                    ctx.strokeRect(x1, y1, width, height);
+
+                    const detConf = typeof detection.confidence === 'number' ? (detection.confidence * 100).toFixed(0) : "";
+                    const ocrTextLabel = ocr && ocr.text ? ocr.text : "";
+                    const ocrConfLabel = ocr && typeof ocr.confidence === 'number' ? (ocr.confidence * 100).toFixed(0) : "";
+                    const label = `${ocrTextLabel} (D:${detConf}% O:${ocrConfLabel}%)`;
+
+                    const fontHeight = Math.max(10, Math.min(14, Math.round(canvas.width / 40))); // Tamaño de fuente adaptativo
+                    ctx.font = `bold ${fontHeight}px Arial`;
+                    ctx.textBaseline = 'bottom';
+                    const textMetrics = ctx.measureText(label);
+                    const textWidth = textMetrics.width;
+
+                    ctx.fillStyle = 'rgba(0, 255, 0, 0.75)'; // Fondo semi-transparente
+                    ctx.fillRect(x1, y1 - (fontHeight + 4), textWidth + 4, fontHeight + 4);
+                    ctx.fillStyle = 'black';
+                    ctx.fillText(label, x1 + 2, y1 - 2);
+                });
             }
 
             async function startVideoStream() {
                 if (isCameraRunning) return;
-                if (!alprInstance) {
-                    updateStatus("ALPR no inicializado. Intentando inicializar...");
-                    if (!await initializeAlprModel()) return;
+                if (!alprWorker || !isWorkerInitialized) {
+                    updateStatus("ALPR Worker no inicializado. Por favor espera o reintenta.", true);
+                    await initializeAlprWorker(); // Intentar inicializar si no lo está
+                    if(!isWorkerInitialized) { // Si falló de nuevo
+                        showLoader(false);
+                        return;
+                    }
                 }
 
                 updateStatus("Iniciando cámara...");
@@ -197,29 +324,38 @@
                 try {
                     const constraints = {
                         video: {
-                            //width: { ideal: 640 }, height: { ideal: 480 },
-                            facingMode: "environment" // Preferir cámara trasera
-                        }
+                            // width: { ideal: 640 }, height: { ideal: 480 }, // Puedes especificar tamaños ideales
+                            facingMode: "environment"
+                        },
+                        audio: false
                     };
                     videoStream = await navigator.mediaDevices.getUserMedia(constraints);
                     videoElement.srcObject = videoStream;
+                    // videoElement.play(); // Autoplay está activado
 
-                    videoElement.onloadedmetadata = () => {
-                        videoElement.play();
+                    videoElement.onloadedmetadata = () => { // Se dispara una vez que las dimensiones del video son conocidas
+                        // Sincronizar tamaño del canvas de dibujo con el video
+                        processedCanvas.width = videoElement.videoWidth;
+                        processedCanvas.height = videoElement.videoHeight;
+                        // Ajustar CSS del canvas para superposición correcta
+                        const videoRect = videoElement.getBoundingClientRect();
+                        processedCanvas.style.position = 'absolute';
+                        processedCanvas.style.left = videoElement.offsetLeft + 'px';
+                        processedCanvas.style.top = videoElement.offsetTop + 'px';
+                        processedCanvas.style.width = videoRect.width + 'px';
+                        processedCanvas.style.height = videoRect.height + 'px';
+
+
                         isCameraRunning = true;
                         cameraButton.textContent = 'Detener Cámara';
                         cameraButton.classList.add('stop');
                         showLoader(false);
                         updateStatus("Cámara iniciada. Procesando frames...");
 
-                        // Ajustar tamaño del canvas al video
-                        const videoSettings = videoStream.getVideoTracks()[0].getSettings();
-                        processedCanvas.width = videoSettings.width || videoElement.videoWidth;
-                        processedCanvas.height = videoSettings.height || videoElement.videoHeight;
-                        console.log(`Video resolution: ${processedCanvas.width}x${processedCanvas.height}`);
-
                         lastProcessTime = performance.now();
-                        animationFrameId = requestAnimationFrame(processVideoFrameLoop);
+                        processingFrameInWorker = false;
+                        if (animationFrameId) cancelAnimationFrame(animationFrameId);
+                        animationFrameId = requestAnimationFrame(videoProcessingLoop);
                     };
 
                 } catch (error) {
@@ -243,116 +379,73 @@
                     cancelAnimationFrame(animationFrameId);
                     animationFrameId = null;
                 }
-                //canvasCtx.clearRect(0, 0, processedCanvas.width, processedCanvas.height);
+                canvasCtx.clearRect(0, 0, processedCanvas.width, processedCanvas.height);
                 resultsArea.textContent = '';
                 updateStatus("Cámara detenida.");
                 showLoader(false);
+                processingFrameInWorker = false;
             }
 
-            async function processVideoFrameLoop(currentTime) {
-                if (!isCameraRunning || !alprInstance || !videoElement.HAVE_ENOUGH_DATA) {
-                    if (isCameraRunning) animationFrameId = requestAnimationFrame(processVideoFrameLoop);
+            // Bucle de renderizado del video y envío de frames al worker
+            function videoProcessingLoop(currentTime) {
+                if (!isCameraRunning) {
+                    if (animationFrameId) cancelAnimationFrame(animationFrameId);
+                    animationFrameId = null;
                     return;
                 }
+
+                // Dibujar el video en el elemento <video> es automático por el navegador.
+                // El canvas 'processedCanvas' solo se usa para dibujar las bounding boxes.
 
                 const deltaTime = currentTime - lastProcessTime;
                 const interval = 1000 / TARGET_FPS_PROCESSING;
 
-                if (deltaTime < interval) { // Limitar FPS de procesamiento
-                    animationFrameId = requestAnimationFrame(processVideoFrameLoop);
-                    return;
+                if (deltaTime >= interval && !processingFrameInWorker && isWorkerInitialized && videoElement.readyState >= videoElement.HAVE_METADATA && videoElement.videoWidth > 0) {
+                    lastProcessTime = currentTime - (deltaTime % interval);
+                    processingFrameInWorker = true;
+                    frameCounter++;
+
+                    // Capturar ImageData del videoElement para enviar al worker
+                    // Es mejor crear un canvas temporal para esto para no depender del canvas de dibujo
+                    const tempCaptureCanvas = document.createElement('canvas');
+                    tempCaptureCanvas.width = videoElement.videoWidth; // Usar dimensiones reales del video
+                    tempCaptureCanvas.height = videoElement.videoHeight;
+                    const tempCtx = tempCaptureCanvas.getContext('2d', { willReadFrequently: true });
+                    tempCtx.drawImage(videoElement, 0, 0, tempCaptureCanvas.width, tempCaptureCanvas.height);
+                    const imageData = tempCtx.getImageData(0, 0, tempCaptureCanvas.width, tempCaptureCanvas.height);
+
+                    // console.log(`Hilo Principal: Enviando frame ${frameCounter} al worker.`);
+                    alprWorker.postMessage({
+                        type: 'processFrame',
+                        payload: imageData,
+                        frameId: frameCounter
+                    }, [imageData.data.buffer]); // Transferir el buffer para mejor rendimiento
                 }
-                lastProcessTime = currentTime - (deltaTime % interval);
-
-
-                // Dibujar el frame actual del video en el canvas principal
-                canvasCtx.drawImage(videoElement, 0, 0, processedCanvas.width, processedCanvas.height);
-
-                // La entrada para ALPR.predict puede ser:
-                // 1. videoElement: si ALPR lo soporta directamente.
-                // 2. processedCanvas: el canvas donde ya dibujamos el frame.
-                // 3. Un cv.Mat: si ALPR lo requiere (necesitaría `cv.imread(processedCanvas)`).
-                // Asumimos que ALPR puede tomar un HTMLCanvasElement o HTMLVideoElement.
-                const inputForAlpr = processedCanvas; // O videoElement
-
-                try {
-                    const startTime = performance.now();
-                    // `predict` y `drawPredictions` pueden ser costosos.
-                    const detections = await alprInstance.predict(inputForAlpr);
-
-                    if (detections && detections.length > 0) {
-                        // Asumimos que drawPredictions dibuja SOBRE la imagen que se le pasa,
-                        // o devuelve un nuevo canvas con la imagen + las detecciones.
-                        // Si devuelve un nuevo canvas:
-                        const canvasWithDetections = await alprInstance.drawPredictions(inputForAlpr, detections);
-                        canvasCtx.clearRect(0,0, processedCanvas.width, processedCanvas.height); // Limpiar canvas principal
-                        canvasCtx.drawImage(canvasWithDetections, 0, 0, processedCanvas.width, processedCanvas.height); // Dibujar el resultado
-                    }
-                    // Si no hay detecciones, el canvas ya tiene el frame del video (dibujado arriba).
-
-                    const endTime = performance.now();
-                    const duration = ((endTime - startTime) / 1000).toFixed(2);
-
-                    if (detections && detections.length > 0) {
-                        let resultsText = `Procesado en ${duration}s. ${detections.length} placa(s) encontrada(s):\n\n`;
-                        detections.forEach((item, index) => {
-                            const { detection, ocr } = item;
-                            resultsText += `Placa ${index + 1}: ${ocr.text || "N/A"} (OCR Conf: ${(ocr.confidence*100).toFixed(1)}%)\n`;
-                            resultsText += `  └─ Detector Conf: ${(detection.confidence*100).toFixed(1)}% \n`;
-                        });
-                        resultsArea.textContent = resultsText.trim();
-                    } else {
-                        // resultsArea.textContent = `Procesado en ${duration}s. No se encontraron placas.`;
-                        // Opcional: limpiar resultados si no hay detecciones para evitar confusión
-                        // resultsArea.textContent = '';
-                    }
-
-                } catch (error) {
-                    // No actualizar con error cada frame para no ser molesto, solo loguear.
-                    console.error(`Error en detección: ${error.message}`);
-                    // Podrías querer detener el stream si los errores son persistentes.
-                    // stopVideoStream();
-                    // updateStatus(`Error en detección: ${error.message}. Se detuvo la cámara.`, true);
-                }
-
-                if (isCameraRunning) {
-                    animationFrameId = requestAnimationFrame(processVideoFrameLoop);
-                }
+                animationFrameId = requestAnimationFrame(videoProcessingLoop);
             }
 
             // --- Event Listeners ---
             modelSelect.addEventListener('change', async () => {
-                currentDetectorModelName = modelSelect.value;
-                updateStatus(`Detector cambiado a: ${currentDetectorModelName}.`);
-                // Re-inicializar ALPR con el nuevo modelo.
-                // Si la cámara está corriendo, se detendrá y deberá reiniciarse manualmente
-                // o podríamos reiniciarla automáticamente.
+                currentDetectorModelName = modelSelect.value; // Actualizar variable global
+                updateStatus(`Detector cambiado a: ${currentDetectorModelName}. Reinicializando ALPR Worker...`);
                 if (isCameraRunning) {
-                    stopVideoStream(); // Detener antes de cambiar modelo
+                    stopVideoStream();
                 }
-                await initializeAlprModel();
-                // Informar al usuario que debe reiniciar la cámara si estaba activa.
-                if (videoStream) { // Si había un stream antes (aunque ahora esté detenido)
-                    updateStatus(`Modelo cambiado. Por favor, reinicia la cámara.`, false);
-                }
+                await initializeAlprWorker(); // Reinicia el worker con el nuevo modelo
+                // No es necesario informar al usuario que reinicie la cámara,
+                // si estaba activa, ya se detuvo. Puede volver a iniciarla.
             });
 
             cameraButton.addEventListener('click', () => {
-                // Verificar si OpenCV está cargado (si ALPR.js lo necesitara implícitamente para cv.Mat)
-                if (typeof cv === 'undefined' || typeof cv.imread !== 'function') {
-                     const errorMsg = "OpenCV.js (cv) no está cargado. Asegúrate de que 'opencv.js' esté en la ruta correcta (ej. ./libs/opencv.js) y la etiqueta script esté DESCOMENTADA en el HTML.";
-                     updateStatus(errorMsg, true);
-                     alert("Error: OpenCV.js no está cargado. Revisa la consola y las instrucciones en el HTML.\n" + errorMsg);
-                     return;
-                }
-
+                // La verificación de OpenCV ya no es necesaria aquí, se hace en el worker.
                 if (isCameraRunning) {
                     stopVideoStream();
                 } else {
-                    // Si alprInstance no existe o el modelo cambió, inicializarlo primero.
-                    if (!alprInstance || alprInstance.detectorModel !== currentDetectorModelName /* Asumiendo que puedes acceder al nombre del modelo en la instancia */) {
-                       initializeAlprModel().then(success => {
-                           if (success) startVideoStream();
+                    if (!alprWorker || !isWorkerInitialized) {
+                       initializeAlprWorker().then(() => {
+                           if (isWorkerInitialized) startVideoStream();
+                       }).catch(err => {
+                            console.error("Fallo en secuencia de inicialización/arranque de cámara", err);
                        });
                     } else {
                         startVideoStream();
@@ -361,25 +454,10 @@
             });
 
             // --- Inicialización al Cargar la Página ---
-            // Esperar un poco para que OpenCV.js (cargado con async) pueda estar disponible.
-            let opencvCheckInterval = setInterval(() => {
-                if (typeof cv !== 'undefined' && cv.imread) {
-                    clearInterval(opencvCheckInterval);
-                    updateStatus("OpenCV.js cargado. Aplicación lista.", false);
-                    cameraButton.disabled = false; // Habilitar botón de cámara
-                }
-            }, 100);
-
-            setTimeout(() => { // Timeout por si OpenCV no carga
-                clearInterval(opencvCheckInterval);
-                if (typeof cv === 'undefined' || typeof cv.imread !== 'function') {
-                    updateStatus("ADVERTENCIA: OpenCV.js (cv) no cargó después de unos segundos. La detección podría fallar. Verifica la ruta en el HTML y los errores en la consola.", true);
-                    cameraButton.disabled = true;
-                }
-            }, 5000); // Esperar máx 5 segundos
-
-            updateStatus('Aplicación inicializada. Esperando carga de OpenCV.js...', false);
-            cameraButton.disabled = true; // Deshabilitar hasta que OpenCV esté listo
+            updateStatus('Aplicación inicializada. Esperando interacción del usuario.', false);
+            cameraButton.disabled = false; // Habilitar botón de cámara
+            // Opcional: Pre-inicializar el worker al cargar la página
+            // initializeAlprWorker();
         });
     </script>
 

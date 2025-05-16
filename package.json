@@ -10,6 +10,8 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
-    "express": "^5.1.0"
+    "@techstark/opencv-js": "^4.10.0-release.1",
+    "express": "^5.1.0",
+    "onnxruntime-web": "^1.22.0"
   }
 }

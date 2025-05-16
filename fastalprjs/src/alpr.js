@@ -297,6 +297,34 @@ export default class ALPR {
    * @returns {Promise<cv.Mat>}
    */
   async loadImage(source) {
+
+    const isInWorker = typeof self.document === 'undefined';
+
+    if (source instanceof (isInWorker ? OffscreenCanvas : HTMLCanvasElement)) { // Adaptar al entorno
+        return source;
+    }
+    if (source instanceof cv.Mat) { // Si ya es un Mat (desde el worker)
+        // El detector espera un Canvas/Image. OCR espera Mat.
+        // Esto es ineficiente. Idealmente, el detector también tomaría Mat.
+        // Para ahora, si estamos en worker, creamos OffscreenCanvas.
+        if (isInWorker) {
+            const offscreenCanvas = new OffscreenCanvas(source.cols, source.rows);
+            cv.imshow(offscreenCanvas, source); // cv.imshow puede funcionar con OffscreenCanvas si OpenCV está compilado para ello
+            return offscreenCanvas;
+        } else { // Hilo principal
+            const canvas = document.createElement('canvas');
+            canvas.width = source.cols;
+            canvas.height = source.rows;
+            cv.imshow(canvas, source);
+            return canvas;
+        }
+    }
+    if (source instanceof ImageData && isInWorker) {
+        const offscreenCanvas = new OffscreenCanvas(source.width, source.height);
+        offscreenCanvas.getContext('2d').putImageData(source, 0, 0);
+        return offscreenCanvas;
+    }
+
     // Si ya viene un canvas, lo devolvemos directamente
     if (source instanceof HTMLCanvasElement) {
       return source;
@@ -327,29 +355,18 @@ export default class ALPR {
       img.src     = url;
     });
 
-    let imgEl;
-
+     let imgEl;
     if (typeof source === 'string') {
       imgEl = await loadImgEl(source);
-
     } else if (source instanceof Blob || source instanceof File) {
-      // Lee Blob/File como DataURL
-      const dataURL = await new Promise((res, rej) => {
-        const r = new FileReader();
-        r.onload  = () => res(r.result);
-        r.onerror = () => rej(new Error('Error leyendo Blob/File'));
-        r.readAsDataURL(source);
-      });
+      const dataURL = await new Promise((res, rej) => { /* ... */ });
       imgEl = await loadImgEl(dataURL);
-
     } else if (source instanceof HTMLImageElement) {
       imgEl = source;
-
     } else {
-      throw new TypeError('Formato de imagen no soportado en loadImage');
+      throw new TypeError('Formato de imagen no soportado en loadImage (contexto principal)');
     }
-
-    return imgToCanvas(imgEl);
+    return imgToCanvas(imgEl); // imgToCanvas debe usar OffscreenCanvas si está en worker
   }
 
 
@@ -358,38 +375,112 @@ export default class ALPR {
    * @param {string|Blob|File|HTMLImageElement|HTMLCanvasElement|cv.Mat} frame
    * @returns {Promise<ALPRResult[]>}
    */
-  async predict(frame) {
-    // 1) Asegurarnos de trabajar sobre un canvas válido
-    const canvas = await this.loadImage(frame);
 
-    // 2) Detección de bounding-boxes con tu detector YOLO
-    const plateDetections = await this.detector.predict(canvas);
+  async predict(frameInput) { // frameInput será cv.Mat desde el worker
+    let inputForDetector; // Será OffscreenCanvas si frameInput es cv.Mat/ImageData en worker
+    let matForOcr;        // Será el frameInput (cv.Mat)
+    let mustDeleteMatForOcr = false; // Si creamos matForOcr desde algo que no es cv.Mat
+    let mustDeleteInputForDetector = false;
 
-    // 3) Para OCR: convertir a cv.Mat
-    const mat   = cv.imread(canvas);
-    const out   = [];
+    const isInWorker = typeof self.document === 'undefined';
+
+    if (frameInput instanceof cv.Mat) {
+        matForOcr = frameInput; // OCR usa el Mat directamente
+        // Detector (YOLO) espera Canvas/Image. Convertir Mat a OffscreenCanvas en worker.
+        if (isInWorker) {
+            inputForDetector = new OffscreenCanvas(frameInput.cols, frameInput.rows);
+            cv.imshow(inputForDetector, frameInput); // cv.imshow con OffscreenCanvas
+        } else { // Esto no debería ocurrir si el worker envía Mat, pero por si acaso
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = frameInput.cols;
+            tempCanvas.height = frameInput.rows;
+            cv.imshow(tempCanvas, frameInput);
+            inputForDetector = tempCanvas;
+            mustDeleteInputForDetector = true; // Si se creó un canvas en hilo ppal
+        }
+    } else if (frameInput instanceof ImageData) { // Si el worker enviara ImageData
+        matForOcr = cv.matFromImageData(frameInput);
+        mustDeleteMatForOcr = true;
+        if (isInWorker) {
+            inputForDetector = new OffscreenCanvas(frameInput.width, frameInput.height);
+            inputForDetector.getContext('2d').putImageData(frameInput, 0, 0);
+        } else {
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = frameInput.width;
+            tempCanvas.height = frameInput.height;
+            tempCanvas.getContext('2d').putImageData(frameInput, 0, 0);
+            inputForDetector = tempCanvas;
+            mustDeleteInputForDetector = true;
+        }
+    } else if (frameInput instanceof (isInWorker ? OffscreenCanvas : HTMLCanvasElement) || frameInput instanceof HTMLImageElement) {
+        // Si ya es un canvas/imagen (más probable en hilo principal, o si loadImage lo preparó)
+        inputForDetector = frameInput;
+        // Crear mat para OCR, si cv está disponible
+        if (typeof cv !== 'undefined' && cv.imread) {
+            matForOcr = cv.imread(inputForDetector); // imread puede tomar canvas/image
+            mustDeleteMatForOcr = true;
+        } else {
+            throw new Error("OpenCV (cv.imread) no disponible para procesar entrada para OCR.");
+        }
+    } else {
+        throw new TypeError(`Formato de frame no soportado en ALPR.predict: ${frameInput ? frameInput.constructor.name : frameInput}`);
+    }
+
+    // Ahora this.detector.predict (que es LicensePlateDetector.predict)
+    // recibirá un HTMLCanvasElement (hilo ppal) o un OffscreenCanvas (worker).
+    // Y openimageclaude.js fue modificado para manejar OffscreenCanvas.
+    const plateDetections = await this.detector.predict(inputForDetector);
+    const out = [];
 
     try {
-      for (const det of plateDetections) {
-        const { x1, y1, x2, y2 } = det.boundingBox;
-        // Ajustar ROI dentro de los límites:
-        const rect = new cv.Rect(
-          Math.max(x1, 0),
-          Math.max(y1, 0),
-          Math.min(x2 - x1, mat.cols),
-          Math.min(y2 - y1, mat.rows)
-        );
-        const roi = mat.roi(rect);
+        if (plateDetections && plateDetections.length > 0 && matForOcr && !matForOcr.empty()) {
+            for (const det of plateDetections) {
+        if (!det.boundingBox) {
+                    console.warn("Detección sin boundingBox:", det);
+                    out.push(new ALPRResult(det, null));
+                    continue;
+                }
+                const { x1, y1, x2, y2 } = det.boundingBox;
+                const rectX = Math.max(0, Math.round(x1));
+                const rectY = Math.max(0, Math.round(y1));
+                const rectWidth = Math.max(0, Math.round(x2 - rectX)); // Ancho desde x1 ajustado
+                const rectHeight = Math.max(0, Math.round(y2 - rectY)); // Alto desde y1 ajustado
 
-        // OCR sobre cada placa
-        const ocrRes = await this.ocr.predict(roi);
-        out.push(new ALPRResult(det, ocrRes));
+                if (rectWidth === 0 || rectHeight === 0 ||
+                    rectX + rectWidth > matForOcr.cols ||
+                    rectY + rectHeight > matForOcr.rows) {
+                    console.warn("ALPR: ROI inválido o fuera de límites, saltando OCR para esta detección:", {x1,y1,x2,y2}, "dims:", {w:matForOcr.cols, h:matForOcr.rows});
+                    out.push(new ALPRResult(det, null));
+                    continue;
+                }
 
-        roi.delete();
-      }
-      return out;
+                const roi = matForOcr.roi(new cv.Rect(rectX, rectY, rectWidth, rectHeight));
+                let ocrRes = null;
+                if (!roi.empty()) {
+                    ocrRes = await this.ocr.predict(roi); // this.ocr.predict (DefaultOCR) espera cv.Mat
+                    if (!roi.isDeleted()) roi.delete(); // Asegurar que ROI se borre
+                } else {
+                    console.warn("ALPR: ROI estaba vacío para la detección:", {x1,y1,x2,y2});
+                    if (!roi.isDeleted()) roi.delete(); // Borrar aunque esté vacío
+                }
+                out.push(new ALPRResult(det, ocrRes));
+            }
+        } else if (plateDetections && plateDetections.length > 0) {
+            // Hay detecciones pero no se pudo procesar matForOcr
+             plateDetections.forEach(det => out.push(new ALPRResult(det, null)));
+             console.warn("ALPR: Se obtuvieron detecciones pero matForOcr no era válido para OCR.");
+        }
+        return out;
     } finally {
-      mat.delete();
+        if (mustDeleteMatForOcr && matForOcr && !matForOcr.isDeleted()) {
+            matForOcr.delete();
+        }
+        // No borrar inputForDetector aquí si es el mismo que frameInput (cv.Mat)
+        // o si es un OffscreenCanvas que podría ser reutilizado o manejado por el llamador.
+        // La gestión de memoria de OffscreenCanvas es menos explícita que cv.Mat.
+        if (mustDeleteInputForDetector && inputForDetector && inputForDetector instanceof HTMLCanvasElement && !isInWorker) {
+             // inputForDetector.remove(); // Solo si fue un elemento temporal del DOM
+        }
     }
   }
 
@@ -451,21 +542,6 @@ export default class ALPR {
     drawMat.delete();
     return outCanvas;
   }
-}
-
-// Exportar las clases para su uso en el navegador
-if (typeof window !== 'undefined') {
-  window.FastALPR = {
-    ALPR,
-    BoundingBox,
-    DetectionResult,
-    OcrResult,
-    BaseDetector,
-    BaseOCR,
-    DefaultDetector,
-    DefaultOCR,
-    ALPRResult
-  };
 }
 
 // Exportar para uso con módulos

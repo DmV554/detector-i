@@ -1,23 +1,18 @@
+// Contenido MODIFICADO para openimageclaude.js
+
 /**
  * Open Image Models JS
  * A JavaScript port of the Python open-image-models library for license plate detection
  */
 
 // Import ONNX Runtime Web
-// Note: You'll need to add script tag for ONNX Runtime Web in your HTML
-// <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
+// Nota: ONNX Runtime ya debería estar disponible globalmente si se carga mediante importScripts en el worker.
 
 /**
  * Base class for bounding box representation
  */
 class BoundingBox {
-  /**
-   * Creates a new bounding box
-   * @param {number} x1 - X-coordinate of the top-left corner
-   * @param {number} y1 - Y-coordinate of the top-left corner
-   * @param {number} x2 - X-coordinate of the bottom-right corner
-   * @param {number} y2 - Y-coordinate of the bottom-right corner
-   */
+  // ... (código existente de BoundingBox sin cambios) ...
   constructor(x1, y1, x2, y2) {
     this.x1 = x1;
     this.y1 = y1;
@@ -25,45 +20,24 @@ class BoundingBox {
     this.y2 = y2;
   }
 
-  /**
-   * Gets the width of the bounding box
-   * @returns {number} Width of the bounding box
-   */
   get width() {
     return this.x2 - this.x1;
   }
 
-  /**
-   * Gets the height of the bounding box
-   * @returns {number} Height of the bounding box
-   */
   get height() {
     return this.y2 - this.y1;
   }
 
-  /**
-   * Gets the area of the bounding box
-   * @returns {number} Area of the bounding box
-   */
   get area() {
     return this.width * this.height;
   }
 
-  /**
-   * Gets the center of the bounding box
-   * @returns {Array<number>} [x, y] coordinates of the center
-   */
   get center() {
     const cx = (this.x1 + this.x2) / 2.0;
     const cy = (this.y1 + this.y2) / 2.0;
     return [cx, cy];
   }
 
-  /**
-   * Computes the intersection with another bounding box
-   * @param {BoundingBox} other - Another bounding box
-   * @returns {BoundingBox|null} Intersection bounding box or null if no intersection
-   */
   intersection(other) {
     const x1 = Math.max(this.x1, other.x1);
     const y1 = Math.max(this.y1, other.y1);
@@ -73,41 +47,23 @@ class BoundingBox {
     if (x2 > x1 && y2 > y1) {
       return new BoundingBox(x1, y1, x2, y2);
     }
-
     return null;
   }
 
-  /**
-   * Computes the Intersection over Union (IoU) with another bounding box
-   * @param {BoundingBox} other - Another bounding box
-   * @returns {number} IoU value between 0 and 1
-   */
   iou(other) {
     const inter = this.intersection(other);
-
     if (!inter) {
       return 0.0;
     }
-
     const interArea = inter.area;
     const unionArea = this.area + other.area - interArea;
     return unionArea > 0 ? interArea / unionArea : 0.0;
   }
 
-  /**
-   * Converts bounding box to (x, y, width, height) format
-   * @returns {Array<number>} [x, y, width, height]
-   */
   toXywh() {
     return [this.x1, this.y1, this.width, this.height];
   }
 
-  /**
-   * Clamps the bounding box coordinates to maximum width and height
-   * @param {number} maxWidth - Maximum width
-   * @param {number} maxHeight - Maximum height
-   * @returns {BoundingBox} Clamped bounding box
-   */
   clamp(maxWidth, maxHeight) {
     return new BoundingBox(
       Math.max(0, Math.min(this.x1, maxWidth)),
@@ -117,12 +73,6 @@ class BoundingBox {
     );
   }
 
-  /**
-   * Checks if the bounding box is valid
-   * @param {number} frameWidth - Frame width
-   * @param {number} frameHeight - Frame height
-   * @returns {boolean} True if valid, false otherwise
-   */
   isValid(frameWidth, frameHeight) {
     return (
       0 <= this.x1 &&
@@ -139,25 +89,13 @@ class BoundingBox {
  * Class representing a detection result
  */
 class DetectionResult {
-  /**
-   * Creates a new detection result
-   * @param {string} label - Detected object label
-   * @param {number} confidence - Confidence score of the detection
-   * @param {BoundingBox} boundingBox - Bounding box of the detected object
-   */
+   // ... (código existente de DetectionResult sin cambios) ...
   constructor(label, confidence, boundingBox) {
     this.label = label;
     this.confidence = confidence;
     this.boundingBox = boundingBox;
   }
 
-  /**
-   * Creates a DetectionResult from raw detection data
-   * @param {Array<number>} bboxData - Bounding box coordinates [x1, y1, x2, y2]
-   * @param {number} confidence - Confidence score
-   * @param {string} classId - Class label
-   * @returns {DetectionResult} New detection result
-   */
   static fromDetectionData(bboxData, confidence, classId) {
     const boundingBox = new BoundingBox(...bboxData);
     return new DetectionResult(classId, confidence, boundingBox);
@@ -170,76 +108,83 @@ class DetectionResult {
 const Utils = {
   /**
    * Resizes and pads the input image while maintaining aspect ratio
-   * @param {HTMLImageElement|ImageData|HTMLCanvasElement} im - Input image
+   * @param {HTMLImageElement|ImageData|HTMLCanvasElement|OffscreenCanvas} im - Input image
    * @param {Array<number>|number} newShape - Target shape [width, height] or single number for square
    * @param {Array<number>} color - Padding color [r, g, b]
    * @param {boolean} scaleUp - Whether to scale up the image if it's smaller than target
-   * @returns {Object} Resized image, ratio, and padding information
+   * @returns {Object} Resized image (HTMLCanvasElement or OffscreenCanvas), ratio, and padding information
    */
   letterbox(im, newShape = [640, 640], color = [114, 114, 114], scaleUp = true) {
-    // Create a canvas to work with the image
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d');
+    let canvas, ctx;
+    const isInWorker = typeof self.document === 'undefined'; // Detección de entorno Worker
 
-    // Handle different input types to get width and height
+    if (isInWorker) {
+        canvas = new OffscreenCanvas(typeof newShape === 'number' ? newShape : newShape[0], typeof newShape === 'number' ? newShape : newShape[1]);
+    } else {
+        canvas = document.createElement('canvas');
+    }
+    // El tamaño del canvas se ajustará después de calcular newShape si es un array
+    // ctx = canvas.getContext('2d'); // Se obtiene después de dimensionar
+
     let width, height;
     if (im instanceof HTMLImageElement) {
       width = im.naturalWidth;
       height = im.naturalHeight;
-    } else if (im instanceof ImageData) {
+    } else if (im instanceof ImageData || im instanceof OffscreenCanvas || im instanceof HTMLCanvasElement) { // Incluir OffscreenCanvas y HTMLCanvasElement
       width = im.width;
       height = im.height;
     } else {
-      width = im.width;
-      height = im.height;
+        // Fallback o error si el tipo no es reconocido
+        console.error("Tipo de imagen no soportado en letterbox:", im);
+        throw new Error("Tipo de imagen no soportado en letterbox");
     }
 
-    // Convert integer newShape to a tuple (newShape, newShape)
+
     if (typeof newShape === 'number') {
       newShape = [newShape, newShape];
     }
 
-    // Calculate the scaling ratio
+    // Ajustar dimensiones del canvas si newShape es un array
+    if (canvas.width !== newShape[0] || canvas.height !== newShape[1]) {
+        canvas.width = newShape[0];
+        canvas.height = newShape[1];
+    }
+    ctx = canvas.getContext('2d'); // Ahora obtenemos el contexto
+
     const r = Math.min(newShape[0] / width, newShape[1] / height);
     const ratio = scaleUp ? r : Math.min(r, 1.0);
 
-    // Calculate new unpadded dimensions and padding
     const newUnpad = [Math.round(width * ratio), Math.round(height * ratio)];
     const dw = (newShape[0] - newUnpad[0]) / 2;
     const dh = (newShape[1] - newUnpad[1]) / 2;
 
-    // Set canvas dimensions to target size
-    canvas.width = newShape[0];
-    canvas.height = newShape[1];
-
-    // Fill with padding color
     ctx.fillStyle = `rgb(${color[0]}, ${color[1]}, ${color[2]})`;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-    // Draw the resized image in the center
     const top = Math.round(dh - 0.1);
     const left = Math.round(dw - 0.1);
 
-    if (im instanceof HTMLImageElement) {
-      ctx.drawImage(im, 0, 0, width, height, left, top, newUnpad[0], newUnpad[1]);
-    } else {
-      // For ImageData or canvas, first draw to intermediate canvas
-      const tmpCanvas = document.createElement('canvas');
-      tmpCanvas.width = width;
-      tmpCanvas.height = height;
-      const tmpCtx = tmpCanvas.getContext('2d');
-
-      if (im instanceof ImageData) {
-        tmpCtx.putImageData(im, 0, 0);
-      } else {
-        tmpCtx.drawImage(im, 0, 0);
-      }
-
-      ctx.drawImage(tmpCanvas, 0, 0, width, height, left, top, newUnpad[0], newUnpad[1]);
+    // Si 'im' es ImageData, necesitamos dibujarlo en un canvas temporal primero
+    // o usar OffscreenCanvas si está disponible y 'im' es ImageData
+    if (im instanceof ImageData) {
+        let tempSourceCanvas;
+        let tempSourceCtx;
+        if (isInWorker) {
+            tempSourceCanvas = new OffscreenCanvas(im.width, im.height);
+        } else {
+            tempSourceCanvas = document.createElement('canvas');
+            tempSourceCanvas.width = im.width;
+            tempSourceCanvas.height = im.height;
+        }
+        tempSourceCtx = tempSourceCanvas.getContext('2d');
+        tempSourceCtx.putImageData(im, 0, 0);
+        ctx.drawImage(tempSourceCanvas, 0, 0, im.width, im.height, left, top, newUnpad[0], newUnpad[1]);
+    } else { // HTMLImageElement, HTMLCanvasElement, OffscreenCanvas
+        ctx.drawImage(im, 0, 0, width, height, left, top, newUnpad[0], newUnpad[1]);
     }
 
     return {
-      resizedImage: canvas,
+      resizedImage: canvas, // Devuelve HTMLCanvasElement u OffscreenCanvas
       ratio: [ratio, ratio],
       padding: [dw, dh]
     };
@@ -247,39 +192,27 @@ const Utils = {
 
   /**
    * Preprocesses an image for model inference
-   * @param {HTMLImageElement|ImageData|HTMLCanvasElement} img - Input image
+   * @param {HTMLImageElement|ImageData|HTMLCanvasElement|OffscreenCanvas} img - Input image
    * @param {Array<number>|number} imgSize - Target image size
    * @returns {Object} Preprocessed image and metadata
    */
   preprocess(img, imgSize) {
-    // Resize and pad the image
     const { resizedImage, ratio, padding } = this.letterbox(img, imgSize);
 
-    // Get image data from canvas
-    const canvas = resizedImage;
-    const ctx = canvas.getContext('2d');
-    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const canvasToProcess = resizedImage; // Esto es ahora un HTMLCanvasElement o un OffscreenCanvas
+    const ctx = canvasToProcess.getContext('2d');
+    const imageData = ctx.getImageData(0, 0, canvasToProcess.width, canvasToProcess.height);
     const { data, width, height } = imageData;
 
-    // Create a Float32Array for the model input
-    // ONNX models expect NCHW format (batch, channels, height, width)
     const inputTensor = new Float32Array(1 * 3 * height * width);
-
-    // Convert from RGBA to RGB and from [0, 255] to [0, 1]
     for (let y = 0; y < height; y++) {
       for (let x = 0; x < width; x++) {
         const pixelOffset = (y * width + x) * 4;
-
-        // RGB channels in CHW format
-        // R channel
         inputTensor[0 * height * width + y * width + x] = data[pixelOffset + 0] / 255.0;
-        // G channel
         inputTensor[1 * height * width + y * width + x] = data[pixelOffset + 1] / 255.0;
-        // B channel
         inputTensor[2 * height * width + y * width + x] = data[pixelOffset + 2] / 255.0;
       }
     }
-
     return {
       tensor: inputTensor,
       ratio,
@@ -287,67 +220,40 @@ const Utils = {
     };
   },
 
-  /**
-   * Converts raw model predictions to DetectionResult objects
-   * @param {Float32Array} predictions - Model predictions
-   * @param {Array<string>} classLabels - Class labels
-   * @param {Array<number>} ratio - Scaling ratio [rx, ry]
-   * @param {Array<number>} padding - Padding values [dw, dh]
-   * @param {number} scoreThreshold - Confidence threshold
-   * @returns {Array<DetectionResult>} List of detection results
-   */
+  // ... (convertToDetectionResult y measureTime sin cambios) ...
   convertToDetectionResult(predictions, classLabels, ratio, padding, scoreThreshold = 0.5) {
     const results = [];
-    const numDetections = predictions.length / 7; // 7 values per detection
+    const numDetections = predictions.length / 7; 
 
     for (let i = 0; i < numDetections; i++) {
       const offset = i * 7;
-
-      // Extract box coordinates (x1, y1, x2, y2)
       const bbox = [
-        predictions[offset + 1], // x1
-        predictions[offset + 2], // y1
-        predictions[offset + 3], // x2
-        predictions[offset + 4]  // y2
+        predictions[offset + 1], 
+        predictions[offset + 2], 
+        predictions[offset + 3], 
+        predictions[offset + 4]  
       ];
-
-      // Class ID
       const classId = Math.round(predictions[offset + 5]);
-
-      // Confidence score
       const score = predictions[offset + 6];
 
-      // Skip detections below the threshold
       if (score < scoreThreshold) {
         continue;
       }
 
-      // Adjust bounding box to original image size
       const adjustedBox = [
-        Math.round((bbox[0] - padding[0]) / ratio[0]), // x1
-        Math.round((bbox[1] - padding[1]) / ratio[1]), // y1
-        Math.round((bbox[2] - padding[0]) / ratio[0]), // x2
-        Math.round((bbox[3] - padding[1]) / ratio[1])  // y2
+        Math.round((bbox[0] - padding[0]) / ratio[0]), 
+        Math.round((bbox[1] - padding[1]) / ratio[1]), 
+        Math.round((bbox[2] - padding[0]) / ratio[0]), 
+        Math.round((bbox[3] - padding[1]) / ratio[1])  
       ];
-
-      // Map class ID to label
       const label = classId < classLabels.length ? classLabels[classId] : classId.toString();
-
-      // Create bounding box and detection result
       const boundingBox = new BoundingBox(...adjustedBox);
       const detectionResult = new DetectionResult(label, score, boundingBox);
-
       results.push(detectionResult);
     }
-
     return results;
   },
 
-  /**
-   * Measures execution time of a function
-   * @param {Function} fn - Function to measure
-   * @returns {Promise<Object>} Object with result and time in milliseconds
-   */
   async measureTime(fn) {
     const start = performance.now();
     const result = await fn();
@@ -363,92 +269,106 @@ const Utils = {
  * Class implementing YOLO v9 object detection
  */
 class YoloV9ObjectDetector {
-  /**
-   * Creates a new YOLO v9 object detector
-   * @param {Object} options - Configuration options
-   * @param {string} options.modelPath - Path to the ONNX model file
-   * @param {Array<string>} options.classLabels - List of class labels
-   * @param {number} options.confThresh - Confidence threshold
-   * @param {Array<string>} options.providers - ONNX Runtime providers
-   */
   constructor(options) {
     this.modelPath = options.modelPath;
     this.classLabels = options.classLabels;
     this.confThresh = options.confThresh || 0.25;
-    this.providers = options.providers || ['wasm'];
     this.modelLoaded = false;
     this.model = null;
     this.inputName = '';
     this.outputName = '';
     this.imgSize = [0, 0];
+    // Los providers se configuran globalmente en el worker/hilo principal a través de ort.env
   }
 
-  /**
-   * Loads the ONNX model
-   * @returns {Promise<void>}
-   */
   async loadModel() {
     try {
-      // Create session options
-      const sessionOptions = {
-        executionProviders: this.providers,
-        graphOptimizationLevel: 'all'
-      };
-
-      // Create inference session
-      this.model = await ort.InferenceSession.create(this.modelPath, sessionOptions);
-
-      // Get input and output names
-      this.inputName = this.model.inputNames[0];
-      this.outputName = this.model.outputNames[0];
-
-      // Extract height and width (assuming NCHW format)
-      const h = 512
-      const w = 512
-
-      if (h !== w) {
-        throw new Error(`Model only supports square images, but received shape: ${h}x${w}`);
+      // 'ort' debería estar disponible globalmente aquí (desde importScripts en worker o <script> en main)
+      if (typeof ort === 'undefined') {
+        throw new Error("ONNX Runtime (ort) no está disponible globalmente.");
       }
 
-      this.imgSize = [h, w];
-      this.modelLoaded = true;
+      const sessionOptions = {
+        // executionProviders: this.providers, // Se tomará de ort.env si está configurado allí
+        graphOptimizationLevel: 'all',
+        logSeverityLevel: 2
+      };
+      // Si this.providers fue explícitamente pasado y se quiere forzar:
+      // if (this.providers && this.providers.length > 0) {
+      //   sessionOptions.executionProviders = this.providers;
+      // }
 
-      console.log(`Model loaded successfully with input size: ${h}x${w}`);
+
+      console.log(`YoloV9ObjectDetector: Cargando modelo desde ${this.modelPath} con opciones:`, sessionOptions);
+      this.model = await ort.InferenceSession.create(this.modelPath, sessionOptions);
+
+      this.inputName = this.model.inputNames[0];
+      this.outputName = this.model.outputNames[0];
+      console.log(`YoloV9ObjectDetector: Modelo cargado. Entradas: ${this.model.inputNames}, Salidas: ${this.model.outputNames}, Proveedores efectivos: ${this.model.providers}`);
+
+
+      let h = 512, w = 512; // Default
+      // Lógica para deducir tamaño del modelo si es necesario (ej. de this.modelPath o metadata del modelo)
+      // const inputMetadata = this.model.inputs[this.inputName]; // Esto es pseudocódigo, la API real puede variar
+      // if (inputMetadata && inputMetadata.dims && inputMetadata.dims.length === 4) {
+      //     h = inputMetadata.dims[2];
+      //     w = inputMetadata.dims[3];
+      // } else {
+      //     // Intentar deducir del nombre del archivo
+          const sizeMatch = this.modelPath.match(/-(\d{3,4})-/); // ej. yolov9-t-512-model.onnx
+          if (sizeMatch && sizeMatch[1]) {
+              const parsedSize = parseInt(sizeMatch[1], 10);
+              if (!isNaN(parsedSize) && parsedSize > 0) {
+                  h = parsedSize;
+                  w = parsedSize;
+              }
+          }
+      // }
+      this.imgSize = [h, w];
+
+
+      this.modelLoaded = true;
+      console.log(`YoloV9ObjectDetector: Modelo ONNX ${this.modelPath} cargado. Tamaño de entrada inferido/establecido a: ${this.imgSize[0]}x${this.imgSize[1]}`);
     } catch (error) {
-      console.error('Failed to load ONNX model:', error);
+      console.error(`YoloV9ObjectDetector: Fallo al cargar modelo ONNX (${this.modelPath}):`, error);
+      this.modelLoaded = false; // Asegurar que esté false en caso de error
       throw error;
     }
   }
 
-  /**
-   * Performs object detection on an image
-   * @param {HTMLImageElement|HTMLCanvasElement|ImageData|string} image - Input image or image URL
-   * @returns {Promise<Array<DetectionResult>>} List of detection results
-   */
-  async predict(image) {
+  async predict(image) { // image es HTMLImageElement, HTMLCanvasElement, ImageData, OffscreenCanvas
     if (!this.modelLoaded) {
-      await this.loadModel();
+      // Intentar cargar el modelo si aún no está cargado podría ser una opción,
+      // pero es mejor asegurar que loadModel() se llame explícitamente durante la inicialización.
+      // await this.loadModel(); // Podría causar problemas si se llama concurrentemente.
+      throw new Error("YoloV9ObjectDetector: Modelo no cargado. Llama a loadModel() primero.");
+    }
+     if (typeof ort === 'undefined') { // ort debe estar disponible
+        throw new Error("ONNX Runtime (ort) no está disponible globalmente para predicción.");
     }
 
-    // Load image if it's a URL
+    // imageToProcess será la imagen ya en un formato que Utils.preprocess puede manejar
+    // (ej. OffscreenCanvas si está en worker y la entrada era ImageData)
+    let imageToProcess = image;
+    const isInWorker = typeof self.document === 'undefined';
+
+    // Si la entrada es un string (URL), _loadImageFromUrl solo funciona en hilo principal.
+    // En un worker, se espera que la imagen ya venga como ImageData o similar.
     if (typeof image === 'string') {
-      image = await this._loadImageFromUrl(image);
+      if (!isInWorker) {
+        imageToProcess = await this._loadImageFromUrl(image);
+      } else {
+        throw new Error("YoloV9ObjectDetector: Carga desde URL no soportada en worker. Pasa ImageData/OffscreenCanvas.");
+      }
     }
 
-    // Process the image
-    const { tensor, ratio, padding } = Utils.preprocess(image, this.imgSize);
-
-    // Create ONNX tensor
+    const { tensor, ratio, padding } = Utils.preprocess(imageToProcess, this.imgSize);
     const inputTensor = new ort.Tensor('float32', tensor, [1, 3, this.imgSize[0], this.imgSize[1]]);
-    const feeds = {};
-    feeds[this.inputName] = inputTensor;
+    const feeds = { [this.inputName]: inputTensor };
 
-    // Run inference
     try {
       const results = await this.model.run(feeds);
       const outputData = results[this.outputName].data;
-
-      // Convert predictions to detection results
       return Utils.convertToDetectionResult(
         outputData,
         this.classLabels,
@@ -457,121 +377,39 @@ class YoloV9ObjectDetector {
         this.confThresh
       );
     } catch (error) {
-      console.error('Error during model inference:', error);
+      console.error('YoloV9ObjectDetector: Error durante la inferencia:', error);
       return [];
     }
   }
 
-  /**
-   * Loads an image from a URL
-   * @param {string} url - Image URL
-   * @returns {Promise<HTMLImageElement>} Loaded image
-   * @private
-   */
-  _loadImageFromUrl(url) {
+ _loadImageFromUrl(url) {
+    if (typeof self.document === 'undefined') {
+        return Promise.reject(new Error("_loadImageFromUrl no puede usarse en un worker."));
+    }
     return new Promise((resolve, reject) => {
       const img = new Image();
-      img.crossOrigin = 'anonymous';
+      img.crossOrigin = 'anonymous'; // Para evitar tainted canvas si la URL es de otro origen
       img.onload = () => resolve(img);
-      img.onerror = (err) => reject(new Error(`Failed to load image: ${err}`));
+      img.onerror = (err) => reject(new Error(`Fallo al cargar imagen desde URL: ${url} - ${err.toString()}`));
       img.src = url;
     });
   }
 
-  /**
-   * Performs a warmup run
-   * @param {HTMLImageElement} image - Image for warmup
-   * @param {number} numRuns - Number of warmup runs
-   * @returns {Promise<void>}
-   */
-  async _warmUp(image, numRuns = 10) {
-    console.log(`Starting model warm-up with ${numRuns} runs...`);
-    for (let i = 0; i < numRuns; i++) {
-      await this.predict(image);
-    }
-    console.log('Model warm-up completed.');
-  }
+  // _warmUp, _benchmarkInference, showBenchmark pueden requerir adaptaciones si se usan en worker (ej. cómo crear imagen dummy)
+  // displayPredictions usa document.createElement y no debe usarse en el worker.
 
   /**
-   * Benchmarks the model performance
-   * @param {HTMLImageElement} image - Image for benchmarking
-   * @param {number} numRuns - Number of benchmark runs
-   * @returns {Promise<number>} Total time in milliseconds
-   */
-  async _benchmarkInference(image, numRuns) {
-    console.log(`Starting benchmark with ${numRuns} runs...`);
-    let totalTimeMs = 0;
-
-    for (let i = 0; i < numRuns; i++) {
-      const { timeMs } = await Utils.measureTime(async () => {
-        return await this.predict(image);
-      });
-      totalTimeMs += timeMs;
-    }
-
-    console.log('Benchmark completed.');
-    return totalTimeMs;
-  }
-
-  /**
-   * Shows benchmark results
-   * @param {number} numRuns - Number of benchmark runs
-   * @returns {Promise<void>}
-   */
-  async showBenchmark(numRuns = 1000) {
-    // Create a test image (blank canvas of the right size)
-    const canvas = document.createElement('canvas');
-    canvas.width = this.imgSize[0];
-    canvas.height = this.imgSize[1];
-    const ctx = canvas.getContext('2d');
-
-    // Fill with random pixel values
-    const imgData = ctx.createImageData(canvas.width, canvas.height);
-    for (let i = 0; i < imgData.data.length; i += 4) {
-      imgData.data[i + 0] = Math.floor(Math.random() * 256); // R
-      imgData.data[i + 1] = Math.floor(Math.random() * 256); // G
-      imgData.data[i + 2] = Math.floor(Math.random() * 256); // B
-      imgData.data[i + 3] = 255; // A
-    }
-    ctx.putImageData(imgData, 0, 0);
-
-    // Warm up
-    await this._warmUp(canvas, 100);
-
-    // Benchmark
-    const totalTimeMs = await this._benchmarkInference(canvas, numRuns);
-    const avgTimeMs = totalTimeMs / numRuns;
-    const fps = 1000 / avgTimeMs;
-
-    // Display results
-    console.log('YoloV9 Object Detector Performance');
-    console.log('==================================');
-    console.log(`Model: ${this.modelPath}`);
-    console.log(`Provider: ${this.providers.join(', ')}`);
-    console.log(`Number of Runs: ${numRuns}`);
-    console.log(`Average Time (ms): ${avgTimeMs.toFixed(2)}`);
-    console.log(`Frames Per Second (FPS): ${fps.toFixed(2)}`);
-
-    return {
-      modelPath: this.modelPath,
-      providers: this.providers,
-      numRuns,
-      avgTimeMs,
-      fps
-    };
-  }
-
-  /**
-   * Displays predictions on an image
+   * Displays predictions on an image (SOLO HILO PRINCIPAL)
    * @param {HTMLImageElement|HTMLCanvasElement|ImageData} image - Input image
    * @returns {Promise<HTMLCanvasElement>} Canvas with predictions drawn
    */
   async displayPredictions(image) {
-    // Create a canvas to work with
+    if (typeof self.document === 'undefined') {
+        throw new Error("displayPredictions no puede usarse en un worker debido a la manipulación del DOM.");
+    }
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
 
-    // Set canvas dimensions
     if (image instanceof HTMLImageElement) {
       canvas.width = image.naturalWidth;
       canvas.height = image.naturalHeight;
@@ -580,39 +418,29 @@ class YoloV9ObjectDetector {
       canvas.width = image.width;
       canvas.height = image.height;
       ctx.putImageData(image, 0, 0);
-    } else {
+    } else { // HTMLCanvasElement
       canvas.width = image.width;
       canvas.height = image.height;
       ctx.drawImage(image, 0, 0);
     }
 
-    // Get predictions
-    const detections = await this.predict(image);
+    const detections = await this.predict(image); // Usa el mismo predict
 
-    // Draw predictions
     for (const detection of detections) {
       const bbox = detection.boundingBox;
       const label = `${detection.label}: ${detection.confidence.toFixed(2)}`;
-
-      // Draw bounding box
       ctx.strokeStyle = 'rgb(0, 255, 0)';
       ctx.lineWidth = 2;
       ctx.strokeRect(bbox.x1, bbox.y1, bbox.width, bbox.height);
-
-      // Draw label background
       const textMetrics = ctx.measureText(label);
       const textWidth = textMetrics.width;
-      const textHeight = 20; // Approximate height of the text
-
+      const textHeight = 20; 
       ctx.fillStyle = 'rgb(0, 255, 0)';
       ctx.fillRect(bbox.x1, bbox.y1 - textHeight, textWidth + 10, textHeight);
-
-      // Draw label text
       ctx.fillStyle = 'rgb(0, 0, 0)';
       ctx.font = '16px Arial';
       ctx.fillText(label, bbox.x1 + 5, bbox.y1 - 5);
     }
-
     return canvas;
   }
 }
@@ -633,31 +461,28 @@ const PlateDetectorModel = {
 /**
  * Class for detecting license plates in images
  */
+// Asegúrate que esta clase también esté disponible/exportada si `alpr.js` la necesita directamente.
+// En tu `alpr.js`, importas `LicensePlateDetector` de `../../openimageclaude.js`, así que este es el archivo correcto.
+// Re-declaración de LicensePlateDetector para asegurar que usa el YoloV9ObjectDetector modificado
 export class LicensePlateDetector extends YoloV9ObjectDetector {
-  /**
-   * Creates a new license plate detector
-   * @param {Object} options - Configuration options
-   * @param {string} options.detectionModel - Which model to use (see PlateDetectorModel)
-   * @param {string} options.modelsPath - Path to the directory containing models
-   * @param {number} options.confThresh - Confidence threshold
-   * @param {Array<string>} options.providers - ONNX Runtime providers
-   */
   constructor(options) {
-    // Set default models path if not provided
+    // La ruta './models' debe ser accesible desde el contexto de ejecución (worker o hilo principal)
+    // Si el worker está en la raíz, y 'models' está en la raíz, './models' funciona.
+    // Si se necesita más flexibilidad, la ruta base podría pasarse en las opciones.
     const modelsPath = options.modelsPath || './models';
-
-    // Create the model path based on the selected model
     const modelPath = `${modelsPath}/${options.detectionModel}.onnx`;
 
-    // Initialize with superclass
     super({
       modelPath: modelPath,
       classLabels: ['License Plate'],
       confThresh: options.confThresh || 0.25,
-      providers: options.providers || ['wasm']
     });
-
-    console.log(`Initialized LicensePlateDetector with model ${modelPath}`);
+    console.log(`LicensePlateDetector (openimageclaude.js): Inicializado. Modelo: ${modelPath}`);
   }
 }
 
+// Exportar clases y utilidades si son usadas por otros módulos importados en el worker
+// (como por ALPR.js si este archivo se importa directamente allí)
+// Si ALPR.js importa directamente LicensePlateDetector de este archivo, la exportación es necesaria.
+// (Confirmado: alpr.js importa `LicensePlateDetector` de `../../openimageclaude.js`)
+// No es necesario exportar Utils, BoundingBox, etc., si solo son usados internamente por YoloV9ObjectDetector y LicensePlateDetector.

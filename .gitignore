@@ -1,6 +1,6 @@
 node_modules
 .idea
-models
-models-ocr
+src/models
+src/models-ocr
 package-lock.json
 package.json

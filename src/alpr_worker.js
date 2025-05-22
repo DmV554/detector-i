@@ -12,6 +12,8 @@ let alprInstance = null;
 let cvReady = false;
 let ortReady = false;
 let openCVLoadSuccess = false;
+const heightModelInput = 256;
+const widthModelInput = 256;
 
 // 2. Función para cargar OpenCV.js
 // Se llamará antes de cualquier inicialización que dependa de OpenCV.
@@ -133,16 +135,18 @@ async function initializeAlpr(detectorModel, ocrModelName) {
 
     try {
         alprInstance = new ALPR({ // ALPR se importa dinámicamente
-            detectorModelPath: "./models/",
+            detectorModelsPath: "./models",
             detectorModel: detectorModel,
             ocrModel: ocrModelName,
+            heightModelInput: heightModelInput,
+            widthModelInput: widthModelInput,
         });
 
         // Carga de los modelos internos de ONNX (detector y OCR)
         if (alprInstance && alprInstance.detector && alprInstance.detector.detector) {
             if (!alprInstance.detector.detector.modelLoaded) {
                 console.info("ALPR Worker: Cargando modelo de detector...");
-                await alprInstance.detector.detector.loadModel();
+                await alprInstance.detector.detector.loadModel(heightModelInput, widthModelInput);
             }
         } else {
             throw new Error("Instancia del detector (YoloV9ObjectDetector) no encontrada en ALPR.");

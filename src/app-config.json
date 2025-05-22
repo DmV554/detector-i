@@ -1,0 +1,51 @@
+{
+  "defaultSettings": {
+    "detectorKey": "yolov9_t_512",
+    "ocrKey": "global_plates_mobile_vit_v2",
+    "confThresh": 0.25
+  },
+  "paths": {
+    "baseModelsPath": "./models/",
+    "detectorModelsSubPath": "models-detection/",
+    "ocrModelsSubPath": "models-ocr/",
+    "ocrConfigsSubPath": ""
+  },
+  "detectors": {
+    "yolov9_t_256": {
+      "name": "YOLOv9-T (256x256) - Rápido",
+      "fileName": "yolo-v9-t-256-license-plates-end2end.onnx",
+      "inputHeight": 256,
+      "inputWidth": 256
+    },
+    "yolov9_t_384": {
+      "name": "YOLOv9-T (384x384)",
+      "fileName": "yolo-v9-t-384-license-plates-end2end.onnx",
+      "inputHeight": 384,
+      "inputWidth": 384
+    },
+    "yolov9_t_512": {
+      "name": "YOLOv9-T (512x512) - Balanceado",
+      "fileName": "yolo-v9-t-512-license-plates-end2end.onnx",
+      "inputHeight": 512,
+      "inputWidth": 512
+    },
+    "yolov9_s_608": {
+      "name": "YOLOv9-S (608x608) - Preciso",
+      "fileName": "yolo-v9-s-608-license-plates-end2end.onnx",
+      "inputHeight": 608,
+      "inputWidth": 608
+    }
+  },
+  "ocrModels": {
+    "global_plates_mobile_vit_v2": {
+      "name": "Global Plates MobileViT v2",
+      "hubName": "global-plates-mobile-vit-v2-model",
+      "modelFileName": null,
+      "configFileName": "global_mobile_vit_v2_ocr_config.json"
+    }
+  },
+  "commonParameters": {
+    "onnxExecutionProviders": ["wasm"],
+    "ocrForceDownload": false
+  }
+}

@@ -1,0 +1,174 @@
+/* src/style.css */
+
+body {
+    font-family: Arial, sans-serif;
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 20px;
+    background-color: #f9f9f9;
+}
+
+h1 {
+    color: #333;
+    text-align: center;
+    margin-bottom: 30px;
+}
+
+.container {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    background-color: #fff;
+    padding: 20px;
+    border-radius: 8px;
+    box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+}
+
+.options {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 15px;
+    margin-bottom: 20px;
+    align-items: center;
+    border-bottom: 1px solid #eee;
+    padding-bottom: 20px;
+}
+
+.video-container {
+    border: 1px solid #ddd;
+    padding: 15px;
+    border-radius: 5px;
+    background-color: #fdfdfd;
+    min-height: 300px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    position: relative; /* Para superponer el canvas */
+}
+
+.video-container h3 {
+    margin-top: 0;
+    margin-bottom: 10px;
+    color: #555;
+    text-align: center;
+}
+
+#videoFeed {
+    display: block;
+    width: 100%;
+    max-width: 640px; /* O el tamaño que desees */
+    height: auto;
+    border: 1px solid #888;
+}
+
+#processedCanvas { /* Canvas para DIBUJAR bounding boxes */
+    position: absolute;
+    top: 0; /* Se ajustará con JS para alinearse con el video dentro del contenedor */
+    left: 0;/* Se ajustará con JS */
+    /* width y height se establecen dinámicamente con JS */
+    pointer-events: none; /* Para que no interfiera con el video si está encima */
+}
+
+.results {
+    margin-top: 20px;
+    padding: 15px;
+    background-color: #f0f0f0;
+    border-radius: 5px;
+    white-space: pre-wrap;
+    font-family: 'Courier New', Courier, monospace;
+    border: 1px solid #e0e0e0;
+    max-height: 200px;
+    overflow-y: auto;
+    min-height: 50px;
+}
+
+.results:empty::before {
+    content: "Los resultados aparecerán aquí...";
+    color: #888;
+    font-style: italic;
+}
+
+.loader {
+    border: 5px solid #f3f3f3; /* Light grey */
+    border-top: 5px solid #3498db; /* Blue */
+    border-radius: 50%;
+    width: 30px;
+    height: 30px;
+    animation: spin 1s linear infinite;
+    margin: 0 10px; /* Ajustar según sea necesario */
+    display: none; /* Oculto por defecto */
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+.button {
+    padding: 10px 20px;
+    background-color: #4CAF50; /* Green */
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 16px;
+    transition: background-color 0.2s ease;
+    height: 40px; /* Para alinear con selects e inputs */
+    box-sizing: border-box;
+}
+
+.button:hover:not(:disabled) {
+    background-color: #45a049;
+}
+
+.button:disabled {
+    background-color: #cccccc;
+    cursor: not-allowed;
+}
+
+.button.stop {
+    background-color: #f44336; /* Red */
+}
+.button.stop:hover:not(:disabled) {
+    background-color: #d32f2f;
+}
+
+select, input[type="number"] {
+    padding: 0 10px; /* Ajustar padding para la altura */
+    font-size: 16px;
+    border-radius: 4px;
+    border: 1px solid #ddd;
+    height: 40px; /* Altura consistente */
+    box-sizing: border-box;
+    max-width: 250px; /* O el ancho que prefieras */
+}
+
+label {
+    margin-right: 5px;
+    font-weight: bold;
+    white-space: nowrap; /* Para que no se parta la etiqueta */
+}
+
+.status {
+    margin-top: 10px;
+    text-align: center;
+    color: #666;
+    min-height: 20px; /* Para evitar saltos de layout */
+    font-style: italic;
+}
+
+.coep-info {
+    padding:10px;
+    margin-bottom:15px;
+    background-color: #fff3cd;
+    border: 1px solid #ffeeba;
+    color: #856404;
+    border-radius: 4px;
+    text-align: center;
+    font-size: 0.9em;
+}
+.coep-info code {
+    background-color: #e9ecef;
+    padding: 2px 4px;
+    border-radius: 3px;
+}

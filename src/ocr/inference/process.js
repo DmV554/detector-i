@@ -9,7 +9,6 @@ export const OCRUtils = {
      * Lee una fuente de imagen y la convierte a escala de grises usando OpenCV.js.
      * @param {HTMLImageElement | HTMLCanvasElement | ImageData | OffscreenCanvas | cv.Mat} imageSource
      * @returns {cv.Mat | null} La imagen como un objeto cv.Mat en escala de grises.
-     * @throws {Error} Si la fuente de la imagen no es válida o cv no está inicializado.
      */
     loadImageAndConvertToGrayscale: function(imageSource) {
         if (!cv || !cv.imread) {
@@ -20,15 +19,14 @@ export const OCRUtils = {
         let mustDeleteInitialMat = false;
 
         if (imageSource instanceof cv.Mat) {
-            mat = imageSource; // El llamador debe decidir si clonar o no.
-                           // Para esta función, asumimos que si es un Mat, ya está listo.
+            mat = imageSource;
         } else if (imageSource instanceof ImageData ||
                    imageSource instanceof OffscreenCanvas ||
                   (typeof HTMLCanvasElement !== 'undefined' && imageSource instanceof HTMLCanvasElement) ||
                   (typeof HTMLImageElement !== 'undefined' && imageSource instanceof HTMLImageElement)
         ) {
             try {
-                mat = cv.imread(imageSource); // imread puede manejar varios tipos
+                mat = cv.imread(imageSource);
                 mustDeleteInitialMat = true;
             } catch (err) {
                 console.error("Error al leer la imagen con cv.imread:", err, imageSource);
@@ -38,7 +36,6 @@ export const OCRUtils = {
             throw new Error(`Tipo de imageSource no soportado: ${imageSource ? imageSource.constructor.name : imageSource}`);
         }
 
-
         if (!mat || mat.empty()) {
              console.warn("cv.imread (o el Mat de entrada) devolvió un Mat vacío.");
              if (mat && mustDeleteInitialMat && !mat.isDeleted()) mat.delete();
@@ -47,9 +44,9 @@ export const OCRUtils = {
 
         let matGray = new cv.Mat();
         if (mat.channels() === 1) {
-             matGray = mat.clone(); // Ya está en escala de grises, clonar para no modificar original
+             matGray = mat.clone();
         } else if (mat.channels() === 3) {
-            cv.cvtColor(mat, matGray, cv.COLOR_RGB2GRAY); // Asume RGB si es canvas/image
+            cv.cvtColor(mat, matGray, cv.COLOR_RGB2GRAY);
         } else if (mat.channels() === 4) {
             cv.cvtColor(mat, matGray, cv.COLOR_RGBA2GRAY);
         } else {
@@ -65,12 +62,12 @@ export const OCRUtils = {
     },
 
     /**
-     * Preprocesa la(s) imagen(es) en escala de grises para el modelo OCR.
-     * @param {cv.Mat[]} grayMats - Un array de imágenes cv.Mat (escala de grises).
+     * Preprocesa la(s) imagen(es) en escala de grises para el modelo OCR (formato NHWC).
+     * @param {cv.Mat[]} grayMats - Un array de imágenes cv.Mat (escala de grises, CV_8UC1).
      * @param {number} targetImgHeight - La altura deseada del modelo OCR.
      * @param {number} targetImgWidth - El ancho deseado del modelo OCR.
-     * @param {number} expectedChannels - Canales esperados por el modelo (ej. 1 para gris, 3 para RGB).
-     * @returns {{data: Float32Array, shape: number[]}} Objeto con datos y forma [N, C, H, W].
+     * @param {number} expectedChannels - Canales esperados por el modelo (usualmente 1 para OCR gris).
+     * @returns {{data: Uint8Array, shape: number[]}} Objeto con datos y forma [N, H, W, C].
      */
     preprocessOcrInputs: function(grayMats, targetImgHeight, targetImgWidth, expectedChannels = 1) {
         if (!cv || !cv.resize) {
@@ -81,69 +78,81 @@ export const OCRUtils = {
         }
 
         const batchSize = grayMats.length;
-        // El formato de tensor común es NCHW (Batch, Channels, Height, Width)
-        const C = expectedChannels;
         const H = targetImgHeight;
         const W = targetImgWidth;
-        const targetShape = [batchSize, C, H, W];
-        const tensorData = new Float32Array(batchSize * C * H * W);
+        const C = expectedChannels; // Para OCR en escala de grises que espera 1 canal al final.
 
-        let offset = 0;
+        // El modelo espera [N, H, W, C]
+        const targetShape = [batchSize, H, W, C];
+        const tensorData = new Uint8Array(batchSize * H * W * C);
+        let tensorOffset = 0; // Offset para escribir en tensorData
+
         const dsize = new cv.Size(W, H);
         let tempResized = new cv.Mat();
-        let matToProcess = new cv.Mat();
+        let finalMatForTensorExtraction = new cv.Mat(); // Mat del cual se extraerán los datos
 
         try {
             for (let i = 0; i < batchSize; i++) {
-                const grayMat = grayMats[i];
-                if (!grayMat || grayMat.empty()) {
+                const singleGrayMat = grayMats[i]; // Asumimos que es CV_8UC1
+                if (!singleGrayMat || singleGrayMat.empty()) {
                     throw new Error(`Imagen inválida en el índice ${i}: está vacía.`);
                 }
-                if (grayMat.channels() !== 1) {
-                     throw new Error(`Imagen en el índice ${i} no está en escala de grises (canales: ${grayMat.channels()}).`);
+                 if (singleGrayMat.channels() !== 1 && C === 1) { // Solo error si esperamos 1 canal pero recibimos más
+                    throw new Error(`Imagen en el índice ${i} no es escala de grises de 1 canal, pero se esperan ${C} canales.`);
                 }
 
-                cv.resize(grayMat, tempResized, dsize, 0, 0, cv.INTER_LINEAR);
 
-                // Convertir a 'expectedChannels' si es necesario y normalizar
-                if (expectedChannels === 1) { // Modelo espera entrada en escala de grises
-                    tempResized.convertTo(matToProcess, cv.CV_32F, 1.0 / 255.0); // Normaliza a [0,1]
-                } else if (expectedChannels === 3) { // Modelo espera entrada a color (desde gris)
-                    let colorMat = new cv.Mat();
-                    cv.cvtColor(tempResized, colorMat, cv.COLOR_GRAY2RGB); // o BGR según el modelo
-                    colorMat.convertTo(matToProcess, cv.CV_32F, 1.0 / 255.0);
-                    colorMat.delete();
-                } else {
-                    throw new Error(`Número de canales esperados (${expectedChannels}) no soportado para preprocesamiento OCR.`);
-                }
+                // 1. Redimensionar
+                cv.resize(singleGrayMat, tempResized, dsize, 0, 0, cv.INTER_LINEAR);
 
-                // Copiar datos al tensor en formato NCHW
-                const floatData = matToProcess.data32F; // Acceder a los datos Float32
-                for (let c = 0; c < C; c++) {
-                    for (let h = 0; h < H; h++) {
-                        for (let w = 0; w < W; w++) {
-                            // Si C=1, el índice es h * W + w
-                            // Si C=3, el índice es (h * W + w) * C + c (si los datos están interleaved)
-                            // O si OpenCV lo devuelve plano por canal, ajustar.
-                            // Asumiendo que matToProcess.data32F está en formato HWC
-                            let val;
-                            if (C === 1) {
-                                val = floatData[h * W + w];
-                            } else { // C === 3
-                                val = floatData[(h * W + w) * C + c]; // HWC
-                            }
-                            tensorData[offset + c * (H * W) + h * W + w] = val;
-                        }
+                // 2. Asegurar que tiene `expectedChannels` (C) y es CV_8U.
+                // Si C es 1, y tempResized es CV_8UC1, está listo.
+                // Si C es 3, y tempResized es CV_8UC1, convertir a CV_8UC3.
+                if (C === 1) {
+                    if (tempResized.channels() !== 1) {
+                        // Convertir a 1 canal si no lo es (ej. si singleGrayMat era color y se pasó por error)
+                        cv.cvtColor(tempResized, finalMatForTensorExtraction, cv.COLOR_RGB2GRAY); // o RGBA2GRAY
+                    } else if (tempResized.type() !== cv.CV_8UC1) {
+                        tempResized.convertTo(finalMatForTensorExtraction, cv.CV_8U);
                     }
+                     else {
+                        finalMatForTensorExtraction = tempResized; // Usar directamente
+                    }
+                } else if (C === 3) {
+                    if (tempResized.channels() === 1) {
+                        cv.cvtColor(tempResized, finalMatForTensorExtraction, cv.COLOR_GRAY2RGB); // o GRAY2BGR
+                    } else if (tempResized.channels() === 3 && tempResized.type() !== cv.CV_8UC3) {
+                        tempResized.convertTo(finalMatForTensorExtraction, cv.CV_8U);
+                    }
+                     else if (tempResized.channels() === 4) { // Si es RGBA y queremos RGB
+                        cv.cvtColor(tempResized, finalMatForTensorExtraction, cv.COLOR_RGBA2RGB);
+                    }
+                    else {
+                        finalMatForTensorExtraction = tempResized; // Asumir que ya es CV_8UC3
+                    }
+                } else {
+                    throw new Error(`preprocessOcrInputs: expectedChannels=${C} no está soportado si no es 1 o 3.`);
                 }
-                offset += C * H * W; // Avanzar para el siguiente item del batch
+
+
+                // 3. Copiar datos. `finalMatForTensorExtraction.data` es un Uint8Array
+                // para un Mat CV_8U. Los datos en .data están en orden HWC.
+                // Como queremos NHWC y estamos iterando por N (batch), simplemente
+                // concatenamos los bloques HWC.
+                tensorData.set(finalMatForTensorExtraction.data, tensorOffset);
+                tensorOffset += H * W * C;
             }
         } finally {
             if (!tempResized.isDeleted()) tempResized.delete();
-            if (!matToProcess.isDeleted()) matToProcess.delete();
+            if (finalMatForTensorExtraction !== tempResized && !finalMatForTensorExtraction.isDeleted()) {
+                finalMatForTensorExtraction.delete();
+            }
         }
-        return { data: tensorData, shape: targetShape };
+        console.debug("Preprocesamiento OCR (NHWC) completado. Shape final del tensor:", targetShape);
+        return { data: tensorData, shape: targetShape }; // Shape es [N, H, W, C]
     },
+
+
 
     /**
      * Post-procesa la salida del modelo OCR.

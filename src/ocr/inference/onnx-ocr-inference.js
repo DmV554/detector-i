@@ -122,7 +122,7 @@ export class OnnxOcrRecognizer {
             // 3. Crear tensor de entrada
             const inputName = this.session.inputNames[0];
             if (!inputName) throw new Error("No se pudo determinar nombre de entrada del modelo OCR.");
-            const inputTensor = new ort.Tensor('float32', preprocessedInput.data, preprocessedInput.shape);
+            const inputTensor = new ort.Tensor('uint8', preprocessedInput.data, preprocessedInput.shape);
             const feeds = { [inputName]: inputTensor };
 
             // 4. Ejecutar inferencia

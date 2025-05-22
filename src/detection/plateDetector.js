@@ -283,15 +283,18 @@ export class YoloV9ObjectDetector {
     this.modelPath = options.modelPath;
     this.classLabels = options.classLabels;
     this.confThresh = options.confThresh || 0.25;
-    this.imgSize = options.imgSize || [640, 640]; // Default or allow override
+    // imgSize se establece aquí o en loadModel si se pasan h,w
+    this.imgSize = (options.inputHeight && options.inputWidth) ?
+                   [options.inputHeight, options.inputWidth] :
+                   (options.imgSize || [640, 640]);
+    this.executionProviders = options.executionProviders || ['wasm']; // Guardar EPs
     this.modelLoaded = false;
     this.model = null;
     this.inputName = '';
     this.outputName = '';
-    // this.providers = options.providers || ['wasm']; // Providers are set globally via ort.env
   }
 
-async loadModel(h,w) {
+  async loadModel(h,w) {
     try {
       // 'ort' debería estar disponible globalmente aquí (desde importScripts en worker o <script> en main)
       if (typeof ort === 'undefined') {
@@ -338,34 +341,27 @@ async loadModel(h,w) {
     }
   }
 
-  async predict(image) { // image: HTMLImageElement, HTMLCanvasElement, ImageData, OffscreenCanvas, o string (URL)
+  async predict(image) {
     if (!this.modelLoaded) {
-      // Considera la opción de llamar a this.loadModel() aquí si quieres carga "lazy",
-      // pero manejar la inicialización explícita suele ser más robusto.
-      // await this.loadModel();
       throw new Error("YoloV9ObjectDetector: Modelo no cargado. Llama a loadModel() primero.");
     }
     if (typeof ort === 'undefined') {
-      throw new Error("ONNX Runtime (ort) no está disponible globalmente para predicción.");
+      throw new Error("ONNX Runtime (ort) no disponible para predicción.");
     }
-
     let imageToProcess = image;
     const isInWorker = typeof self.document === 'undefined';
-
-    if (typeof image === 'string') { // Es una URL
+    if (typeof image === 'string') {
       if (isInWorker) {
-        throw new Error("YoloV9ObjectDetector: Carga desde URL no soportada en worker. Pasa ImageData/OffscreenCanvas.");
+        throw new Error("YoloV9ObjectDetector: Carga desde URL no soportada en worker.");
       }
       imageToProcess = await this._loadImageFromUrl(image);
     }
-
     const { tensor, ratio, padding } = Utils.preprocess(imageToProcess, this.imgSize);
     const inputTensor = new ort.Tensor('float32', tensor, [1, 3, this.imgSize[0], this.imgSize[1]]);
     const feeds = { [this.inputName]: inputTensor };
-
     try {
       const results = await this.model.run(feeds);
-      const outputData = results[this.outputName].data; // Asume que .data es Float32Array
+      const outputData = results[this.outputName].data;
       return Utils.convertToDetectionResult(
         outputData,
         this.classLabels,
@@ -375,17 +371,16 @@ async loadModel(h,w) {
       );
     } catch (error) {
       console.error('YoloV9ObjectDetector: Error durante la inferencia:', error);
-      return []; // Retorna un array vacío en caso de error de inferencia
+      return [];
     }
   }
 
-  // Método privado para cargar imagen desde URL (solo hilo principal)
   _loadImageFromUrl(url) {
     return new Promise((resolve, reject) => {
       const img = new Image();
       img.crossOrigin = 'anonymous';
       img.onload = () => resolve(img);
-      img.onerror = (err) => reject(new Error(`Fallo al cargar imagen desde URL: ${url} - ${err.toString()}`));
+      img.onerror = (err) => reject(new Error(`Fallo al cargar imagen: ${url} - ${err.toString()}`));
       img.src = url;
     });
   }
@@ -489,27 +484,18 @@ export const PlateDetectorModel = {
  * Extiende YoloV9ObjectDetector con configuración específica para matrículas.
  */
 export class LicensePlateDetector extends YoloV9ObjectDetector {
-  /**
-   * @param {Object} options
-   * @param {string} options.modelsPath - Ruta base a la carpeta de modelos. Ej: './models' o '../models'
-   * @param {PlateDetectorModel | string} options.detectionModel - Nombre del modelo de detección (de PlateDetectorModel o nombre de archivo sin .onnx).
-   * @param {number} [options.confThresh=0.25] - Umbral de confianza para las detecciones.
-   * @param {Array<number>} [options.imgSize] - Tamaño de entrada para el modelo [altura, ancho]. Si no se provee, se intenta inferir.
-   * @param {Array<string>} [options.providers] - Proveedores de ejecución para ONNX Runtime (ej: ['webgl', 'wasm']). Se recomienda configurar globalmente con ort.env.
-   */
-  constructor(options) {
-    if (!options || !options.modelsPath || !options.detectionModel) {
-      throw new Error("LicensePlateDetector: 'modelsPath' y 'detectionModel' son requeridos en las opciones.");
-    }
+  constructor(options) { // options viene de DefaultDetector
     const modelFileName = options.detectionModel.endsWith('.onnx') ? options.detectionModel : `${options.detectionModel}.onnx`;
     const modelPath = `${options.modelsPath}/${modelFileName}`;
 
-    console.log(modelPath);
     super({
-      ...options, // Pasa todas las opciones, incluyendo confThresh, imgSize si existen
       modelPath: modelPath,
-      classLabels: ['License Plate'], // Específico para este detector
+      classLabels: ['License Plate'],
+      confThresh: options.confThresh,
+      inputHeight: options.inputHeight, // Asegurar que estas se pasen
+      inputWidth: options.inputWidth,   // Asegurar que estas se pasen
+      executionProviders: options.executionProviders // Pasar EPs
     });
-    console.log(`LicensePlateDetector: Inicializado. Modelo: ${modelPath}`);
+    console.log(`LicensePlateDetector: Inicializado. Modelo: ${modelPath}, EPs: ${options.executionProviders?.join(', ')}`);
   }
 }

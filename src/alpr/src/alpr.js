@@ -45,27 +45,37 @@ class BaseOCR {
  class DefaultDetector extends BaseDetector {
   constructor(options = {}) {
     super();
-
     const {
-        modelName = "yolo-v9-t-384-license-plate-end2end",
-        confThresh = 0.4,
-        modelsPath = "./models", // Ruta base para los modelos de detección
+        modelName, // Vendrá de appConfig.detectors[key].fileName
+        confThresh,
+        modelsPath, // Vendrá de appConfig.paths.detectorModelsBasePath + appConfig.paths.detectorModelsSubPath
+        inputHeight,
+        inputWidth,
+        executionProviders // NUEVO: Recibir EPs
     } = options;
 
-    // LicensePlateDetector toma un objeto de opciones
+    if (!modelName || !modelsPath) {
+        throw new Error("DefaultDetector: modelName y modelsPath son requeridos.");
+    }
+
     this.detector = new LicensePlateDetector({
         modelsPath: modelsPath,
-        detectionModel: modelName,
+        detectionModel: modelName, // Este es el fileName
         confThresh: confThresh,
-        // imgSize: [altura, ancho] // Opcional, si se quiere forzar
-        // providers: providers // Ya no se pasa aquí directamente
+        inputHeight: inputHeight,
+        inputWidth: inputWidth,
+        executionProviders: executionProviders // Pasar EPs a LicensePlateDetector
     });
     this.isInitialized = false;
+    this._initialHeight = inputHeight;
+    this._initialWidth = inputWidth;
   }
 
-  async init(height,width) {
+  async init() {
     if (!this.isInitialized) {
-      await this.detector.loadModel(h=height, w=width); // loadModel está en YoloV9ObjectDetector
+      // loadModel en YoloV9ObjectDetector ahora usará los EPs pasados a su constructor
+      // y las dimensiones de this.imgSize (establecidas via opciones del constructor de LicensePlateDetector)
+      await this.detector.loadModel(this._initialHeight, this._initialWidth); // o solo loadModel() si las dimensiones se manejan enteramente en el constructor del detector
       this.isInitialized = true;
       console.log("DefaultDetector inicializado.");
     }
@@ -82,136 +92,125 @@ class BaseOCR {
 }
 
  class DefaultOCR extends BaseOCR {
-  constructor(options = {}) {
-    super();
-    const {
-        hubOcrModel = "global-plates-mobile-vit-v2-model",
-        device = "auto", // 'device' podría no ser usado directamente por OnnxOcrRecognizer si usa 'providers'
-        providers = null,
-        sessOptions = null,
-        modelPath = null,
-        configPath = null,
-        forceDownload = false
-    } = options;
+     constructor(options = {}) {
+         super();
+         const {
+             modelPath,    // Ruta completa al .onnx de OCR (de app-config via alpr_worker)
+             configPath,   // Ruta completa al JSON de config de OCR (de app-config via alpr_worker)
+             executionProviders, // EPs de app-config
+             // ocrForceDownload ya no parece relevante si son archivos locales
+             // ocrModel (nombre del modelo de app-config, puede usarse para logging o si hay lógica de hub residual)
+         } = options;
 
-    this.ocrModel = new OnnxOcrRecognizer({ // Asumimos que esta es la interfaz correcta
-        hubOcrModel: hubOcrModel, // Usado para inicialización
-        // device: device, // Verificar si OnnxOcrRecognizer lo usa o solo providers
-        providers: providers,
-        sessOptions: sessOptions,
-        modelPath: modelPath,
-        configPath: configPath,
-        forceDownload: forceDownload
-    });
-    this.isInitialized = false;
-    this.hubOcrModel = hubOcrModel; // Guardar para init
-  }
+         if (!modelPath || !configPath) { // Requerir estas rutas
+             throw new Error("DefaultOCR: modelPath y configPath son requeridos.");
+         }
 
-  async init() {
-    if (!this.isInitialized && this.ocrModel && typeof this.ocrModel.initialize === 'function') {
-        try {
-            await this.ocrModel.initialize(this.hubOcrModel); // Pasa el nombre/identificador del modelo
-            this.isInitialized = true;
-            console.log("DefaultOCR inicializado.");
-        } catch (error) {
-            console.error("Error inicializando DefaultOCR:", error);
-            this.isInitialized = false; // Asegurar que quede como no inicializado
-            throw error; // Re-lanzar para que ALPR.init() pueda capturarlo
-        }
-    } else if (this.isInitialized) {
-        console.log("DefaultOCR ya estaba inicializado.");
-    } else {
-        console.warn("DefaultOCR: this.ocrModel o this.ocrModel.initialize no están definidos.");
-    }
-  }
+         this.ocrModel = new OnnxOcrRecognizer({
+             modelPath: modelPath,
+             configPath: configPath,
+             executionProviders: executionProviders, // Pasar los EPs
+             // sessionOptions: options.ocrSessOptions // Si tienes más opciones de sesión
+         });
+         this.isInitialized = false;
+         // this.hubOcrModel = options.ocrModel; // Guardar el nombre/key si es útil para logging
+     }
 
-  async predict(croppedPlate) { // Espera cv.Mat
-    if (!this.isInitialized) {
-      throw new Error("DefaultOCR no inicializado. Llama a init() primero.");
-    }
-    if (!croppedPlate || croppedPlate.empty()) {
-      console.warn("DefaultOCR.predict: croppedPlate está vacío o no es válido.");
-      return null;
-    }
 
-    let grayPlate = new cv.Mat();
-    let ocrResult = null;
+     async init() {
+         if (!this.isInitialized && this.ocrModel) { // initialize ya no toma argumento
+             try {
+                 await this.ocrModel.initialize();
+                 this.isInitialized = true;
+                 console.log("DefaultOCR inicializado (usando OnnxOcrRecognizer con JSON config).");
+             } catch (error) {
+                 console.error("Error inicializando DefaultOCR:", error);
+                 this.isInitialized = false;
+                 throw error;
+             }
+         } else if (this.isInitialized) {
+             console.log("DefaultOCR ya estaba inicializado.");
+         } else {
+             console.warn("DefaultOCR: this.ocrModel o this.ocrModel.initialize no están definidos.");
+         }
+     }
 
+     async predict(croppedPlate) {
+         if (!this.isInitialized) {
+             throw new Error("DefaultOCR no inicializado. Llama a init() primero.");
+         }
+         if (!croppedPlate || croppedPlate.empty()) {
+             console.warn("DefaultOCR.predict: croppedPlate está vacío o no es válido.");
+             return null;
+         }
+     // Ya no es necesario convertir a escala de grises aquí,
+    // OnnxOcrRecognizer.run lo manejará internamente si es necesario,
+    // o OCRUtils.loadImageAndConvertToGrayscale lo hará.
+    // Pasamos el croppedPlate directamente.
+
+    let ocrRunResult = null;
     try {
-      cv.cvtColor(croppedPlate, grayPlate, cv.COLOR_BGR2GRAY); // Asume BGR, si es RGBA sería COLOR_RGBA2GRAY
+        // OnnxOcrRecognizer.run espera una sola imagen.
+        // El segundo parámetro 'returnConfidence' lo he puesto a true en OnnxOcrRecognizer.run
+        // para obtener una estructura similar a la que esperabas.
+        ocrRunResult = await this.ocrModel.run(croppedPlate, true);
 
-      // `run` en OnnxOcrRecognizer puede que no necesite `initialize` en cada llamada
-      const res = await this.ocrModel.run(grayPlate, true); // El segundo parámetro `true` podría ser `keepGrayscale`
+        const text = ocrRunResult && ocrRunResult.textArray && ocrRunResult.textArray.length > 0
+                       ? ocrRunResult.textArray[0].replace(/_/g, "") // Tomar el primer texto y limpiar padding
+                       : "";
+        const meanConf = ocrRunResult && ocrRunResult.probabilities && typeof ocrRunResult.probabilities.mean === 'function'
+                       ? ocrRunResult.probabilities.mean()
+                       : 0;
 
-      let plateTextArray, confidenceObj;
-      if (Array.isArray(res) && res.length === 2) {
-        [plateTextArray, confidenceObj] = res;
-      } else if (res && typeof res === 'object') { // Adaptar si la estructura de 'res' es diferente
-        plateTextArray  = res.textArray    || (res.text ? [res.text] : []);
-        confidenceObj   = res.probabilities || res.confidence || { mean: () => 0.0 }; // Fallback
-      } else {
-        console.warn("DefaultOCR: Formato de respuesta de OCR no esperado", res);
-        plateTextArray = [];
-        confidenceObj = { mean: () => 0.0 };
-      }
+        return new OcrResult(text, meanConf);
 
-      const rawText = Array.isArray(plateTextArray) ? (plateTextArray[0] || "") : String(plateTextArray);
-      const text = rawText.replace(/_/g, "");
-      const meanConf = typeof confidenceObj.mean === 'function' ? confidenceObj.mean() : Number(confidenceObj);
-
-      ocrResult = new OcrResult(text, meanConf);
     } catch (error) {
-        console.error("Error en DefaultOCR.predict:", error);
-        ocrResult = null; // Devolver null en caso de error
-    } finally {
-      if (grayPlate && !grayPlate.isDeleted()) grayPlate.delete();
+        console.error("Error en DefaultOCR.predict llamando a ocrModel.run:", error);
+        return null;
     }
-    return ocrResult;
-  }
-}
+    // No hay Mats que borrar aquí, OnnxOcrRecognizer maneja los suyos.
+    }
+ }
 
-// --- Clase Principal ALPR ---
 export default class ALPR {
   constructor(options = {}) {
     const {
-        detector, // Permite inyectar un detector personalizado
-        ocr,      // Permite inyectar un OCR personalizado
-        // Opciones para DefaultDetector
-        detectorModel = "yolo-v9-t-384-license-plate-end2end",
-        detectorConfThresh = 0.4,
-        detectorModelsPath = "./models", // Renombrado para claridad
-        heightInput = 0,
-        widthInput = 0,
+        detector,
+        ocr,
+        // Detector
+        detectorModel,
+        detectorConfThresh,
+        detectorModelsPath,
+        heightInput,
+        widthInput,
+        detectorExecutionProviders, // NUEVO
 
-        // Opciones para DefaultOCR
-        ocrModel = "global-plates-mobile-vit-v2-model",
-        ocrDevice = "auto",
-        ocrProviders = null, // ['wasm'] o ['webgl'] etc.
-        ocrSessOptions = null,
-        ocrModelPath = null,
-        ocrConfigPath = null,
-        ocrForceDownload = false
+        // OCR
+        ocrModel,
+        ocrModelPath,
+        ocrConfigPath,
+        ocrForceDownload,
+        ocrExecutionProviders // NUEVO
     } = options;
 
     this.detector = detector || new DefaultDetector({
         modelName: detectorModel,
         confThresh: detectorConfThresh,
-        modelsPath: detectorModelsPath
+        modelsPath: detectorModelsPath,
+        inputHeight: heightInput,
+        inputWidth: widthInput,
+        executionProviders: detectorExecutionProviders // Pasar EPs
     });
 
     this.ocr = ocr || new DefaultOCR({
-        hubOcrModel: ocrModel,
-        device: ocrDevice, // Considerar si esto es necesario o solo providers
-        providers: ocrProviders,
-        sessOptions: ocrSessOptions,
+        hubOcrModel: ocrModel, // ID para OnnxOcrRecognizer
         modelPath: ocrModelPath,
         configPath: ocrConfigPath,
-        forceDownload: ocrForceDownload
+        forceDownload: ocrForceDownload,
+        executionProviders: ocrExecutionProviders // Pasar EPs
     });
     this.isInitialized = false;
     this.isInWorker = typeof self.document === 'undefined';
-    this.heightInput = heightInput;
-    this.widthInput = widthInput;
   }
 
   async init() {
@@ -220,7 +219,7 @@ export default class ALPR {
         return;
     }
     console.log("Inicializando ALPR...");
-    await this.detector.init(this.heightInput, this.widthInput);
+    await this.detector.init();
     await this.ocr.init();
     this.isInitialized = true;
     console.log("ALPR inicializado correctamente.");
@@ -231,62 +230,57 @@ export default class ALPR {
    * Devuelve un objeto { inputForDetector, matForOcr, originalWidth, originalHeight }
    * El llamador es responsable de borrar matForOcr si se crea.
    */
-  _prepareImageInputs(frameInput) {
+   _prepareImageInputs(frameInput) {
     if (!this.isInitialized) {
       throw new Error("ALPR no inicializado. Llama a init() primero.");
     }
     if (!cv || typeof cv.imread === 'undefined') {
       throw new Error("OpenCV (cv) no está disponible o no ha terminado de cargar.");
     }
-
-    let inputForDetector = frameInput; // Lo que YoloV9ObjectDetector espera
-    let matForOcr = null;       // cv.Mat para operaciones de OpenCV
+    let inputForDetector = frameInput;
+    let matForOcr = null;
     let originalWidth, originalHeight;
-    let createdMat = null; // Para rastrear si creamos un Mat que necesita ser borrado
-
+    let createdMat = null;
     if (frameInput instanceof cv.Mat) {
-        matForOcr = frameInput; // OCR puede usarlo directamente
+        matForOcr = frameInput;
         originalWidth = matForOcr.cols;
         originalHeight = matForOcr.rows;
-
-        // Convertir cv.Mat a formato para el detector (ImageData o Canvas)
         if (this.isInWorker) {
             let tempMatRgba = new cv.Mat();
             if (matForOcr.channels() === 1) cv.cvtColor(matForOcr, tempMatRgba, cv.COLOR_GRAY2RGBA);
             else if (matForOcr.channels() === 3) cv.cvtColor(matForOcr, tempMatRgba, cv.COLOR_BGR2RGBA);
-            else matForOcr.copyTo(tempMatRgba); // Asume RGBA o maneja error
-
+            else matForOcr.copyTo(tempMatRgba);
             if (tempMatRgba.empty() || tempMatRgba.type() !== cv.CV_8UC4) {
                 console.error("ALPR._prepareImageInputs: Fallo al convertir cv.Mat a RGBA para ImageData.");
                 if(!tempMatRgba.isDeleted()) tempMatRgba.delete();
                 throw new Error("Fallo al convertir cv.Mat a RGBA para ImageData.");
             }
             inputForDetector = new ImageData(new Uint8ClampedArray(tempMatRgba.data), tempMatRgba.cols, tempMatRgba.rows);
-            tempMatRgba.delete(); // El ImageData ahora tiene los datos, tempMatRgba ya no es necesario
-        } else { // Hilo principal
+            tempMatRgba.delete();
+        } else {
             const canvas = document.createElement('canvas');
             cv.imshow(canvas, matForOcr);
             inputForDetector = canvas;
-            originalWidth = canvas.width; // Asegurar que las dimensiones sean del canvas
+            originalWidth = canvas.width;
             originalHeight = canvas.height;
         }
     } else if (frameInput instanceof ImageData) {
         inputForDetector = frameInput;
         matForOcr = cv.matFromImageData(frameInput);
-        createdMat = matForOcr; // Este mat fue creado aquí
+        createdMat = matForOcr;
         originalWidth = frameInput.width;
         originalHeight = frameInput.height;
     } else if (frameInput instanceof (this.isInWorker ? OffscreenCanvas : HTMLCanvasElement)) {
-        inputForDetector = frameInput; // Detector puede usar Canvas
+        inputForDetector = frameInput;
         const ctx = frameInput.getContext('2d');
         const imgData = ctx.getImageData(0, 0, frameInput.width, frameInput.height);
-        matForOcr = cv.matFromImageData(imgData); // Crear Mat desde Canvas para OCR
+        matForOcr = cv.matFromImageData(imgData);
         createdMat = matForOcr;
         originalWidth = frameInput.width;
         originalHeight = frameInput.height;
     } else if (!this.isInWorker && frameInput instanceof HTMLImageElement) {
-        inputForDetector = frameInput; // Detector puede usar HTMLImageElement
-        matForOcr = cv.imread(frameInput); // imread crea un nuevo Mat
+        inputForDetector = frameInput;
+        matForOcr = cv.imread(frameInput);
         createdMat = matForOcr;
         originalWidth = frameInput.naturalWidth;
         originalHeight = frameInput.naturalHeight;
@@ -294,62 +288,46 @@ export default class ALPR {
         console.error(`Formato de frame no soportado en ALPR: ${frameInput ? frameInput.constructor.name : frameInput}`);
         throw new TypeError(`Formato de frame no soportado en ALPR.`);
     }
-
     return { inputForDetector, matForOcr, createdMat, originalWidth, originalHeight };
   }
 
-
   async predict(frameInput) {
     if (!this.isInitialized) {
-        await this.init(); // Intentar inicializar si no lo está
+        await this.init();
         if(!this.isInitialized) throw new Error("ALPR no pudo inicializarse.");
     }
-
     let prep = null;
     let results = [];
-
     try {
         prep = this._prepareImageInputs(frameInput);
         const { inputForDetector, matForOcr, originalWidth, originalHeight } = prep;
-
-        const plateDetections = await this.detector.predict(inputForDetector); // Espera Canvas/ImageData etc.
+        const plateDetections = await this.detector.predict(inputForDetector);
         results = [];
-
         if (plateDetections && plateDetections.length > 0 && matForOcr && !matForOcr.empty()) {
-            for (const det of plateDetections) { // det es DetectorDetectionResult
+            for (const det of plateDetections) {
                 if (!det.boundingBox) {
-                    console.warn("Detección sin boundingBox:", det);
                     results.push(new ALPRResult(det, null));
                     continue;
                 }
-
-                // Las coordenadas de det.boundingBox son relativas a la imagen original
                 const { x1, y1, x2, y2 } = det.boundingBox;
-
                 const boundedX1 = Math.max(0, Math.round(x1));
                 const boundedY1 = Math.max(0, Math.round(y1));
                 const boundedX2 = Math.min(originalWidth, Math.round(x2));
                 const boundedY2 = Math.min(originalHeight, Math.round(y2));
-
                 const rectX = boundedX1;
                 const rectY = boundedY1;
                 const rectWidth = Math.max(0, boundedX2 - boundedX1);
                 const rectHeight = Math.max(0, boundedY2 - boundedY1);
-
                 if (rectWidth <= 0 || rectHeight <= 0 || rectX >= originalWidth || rectY >= originalHeight) {
-                    console.warn("ALPR: ROI inválido o fuera de límites:", { rectX, rectY, rectWidth, rectHeight });
                     results.push(new ALPRResult(det, null));
                     continue;
                 }
-
                 let roi = null;
                 let ocrRes = null;
                 try {
                     roi = matForOcr.roi(new cv.Rect(rectX, rectY, rectWidth, rectHeight));
                     if (roi && !roi.empty()) {
-                        ocrRes = await this.ocr.predict(roi); // ocr.predict espera cv.Mat
-                    } else {
-                        console.warn("ALPR: ROI estaba vacío para la detección:", { rectX, rectY, rectWidth, rectHeight });
+                        ocrRes = await this.ocr.predict(roi);
                     }
                 } finally {
                     if (roi && !roi.isDeleted()) roi.delete();
@@ -357,116 +335,87 @@ export default class ALPR {
                 results.push(new ALPRResult(det, ocrRes));
             }
         } else if (plateDetections && plateDetections.length > 0) {
-            // Hay detecciones pero no se pudo procesar con OCR
             plateDetections.forEach(det => results.push(new ALPRResult(det, null)));
-            console.warn("ALPR: Se obtuvieron detecciones pero matForOcr no era válido para OCR.");
         }
         return results;
-
     } catch (error) {
         console.error("Error en ALPR.predict:", error);
-        return []; // Devolver array vacío en caso de error mayor
+        return [];
     } finally {
         if (prep && prep.createdMat && !prep.createdMat.isDeleted()) {
-            prep.createdMat.delete(); // Borrar el mat principal si lo creamos aquí
+            prep.createdMat.delete();
         }
-        // Si matForOcr era el frameInput original y es un cv.Mat, no lo borramos aquí.
-        // El worker que lo envía es responsable de su limpieza.
     }
   }
 
-
   async drawPredictions(frameInput, existingResults = null) {
     if (this.isInWorker) {
-        console.warn("drawPredictions no está diseñado para usarse directamente en un worker por dependencia del DOM.");
-        return null; // O un objeto que represente las anotaciones sin canvas
+        console.warn("drawPredictions no para worker.");
+        return null;
     }
     if (!cv || typeof cv.imread === 'undefined') {
-        throw new Error("OpenCV (cv) no está disponible o no ha terminado de cargar para drawPredictions.");
+        throw new Error("OpenCV (cv) no disponible para drawPredictions.");
     }
-
     let prep = null;
-    let srcMatForDrawing = null; // Mat original para obtener dimensiones y dibujar sobre él (o un clon)
+    let srcMatForDrawing = null;
     let alprResults = existingResults;
-
     try {
-        // Obtener la imagen como cv.Mat para dibujar y obtener dimensiones
-        prep = this._prepareImageInputs(frameInput); // Nos da matForOcr y dimensiones
-        srcMatForDrawing = prep.matForOcr; // Este es el Mat que corresponde a frameInput
-
+        prep = this._prepareImageInputs(frameInput);
+        srcMatForDrawing = prep.matForOcr;
         if (!srcMatForDrawing || srcMatForDrawing.empty()) {
-            console.error("drawPredictions: No se pudo obtener un cv.Mat válido de la entrada.");
+            console.error("drawPredictions: No se pudo obtener cv.Mat válido.");
             return null;
         }
-
         if (!alprResults) {
-            // Si no se pasan resultados, los calculamos.
-            // Pasamos inputForDetector de la preparación para evitar reconversiones innecesarias.
             alprResults = await this.predict(prep.inputForDetector);
         }
-
-        const drawMat = srcMatForDrawing.clone(); // Clonar para no modificar el original si es una referencia externa
-
+        const drawMat = srcMatForDrawing.clone();
         for (const { detection: det, ocr: ocrRes } of alprResults) {
             if (!det || !det.boundingBox) continue;
-
-            const { x1, y1, x2, y2 } = det.boundingBox; // Estas son DetectorBoundingBox
+            const { x1, y1, x2, y2 } = det.boundingBox;
             cv.rectangle(
                 drawMat,
                 new cv.Point(Math.round(x1), Math.round(y1)),
                 new cv.Point(Math.round(x2), Math.round(y2)),
-                [36, 255, 12, 255], // Verde BGR_A
-                2 // Grosor
+                [36, 255, 12, 255],
+                2
             );
-
             if (ocrRes && ocrRes.text) {
                 const conf = typeof ocrRes.confidence === 'number' ? ocrRes.confidence : 0;
                 const txt = `${ocrRes.text} (${(conf * 100).toFixed(0)}%)`;
                 cv.putText(
                     drawMat,
                     txt,
-                    new cv.Point(Math.round(x1), Math.round(y1) - 5), // Posición del texto
+                    new cv.Point(Math.round(x1), Math.round(y1) - 5),
                     cv.FONT_HERSHEY_SIMPLEX,
-                    0.6, // Escala de la fuente
-                    [255, 255, 255, 255], // Blanco BGR_A
-                    2 // Grosor
+                    0.6,
+                    [255, 255, 255, 255],
+                    2
                 );
             }
         }
-
         const outCanvas = document.createElement('canvas');
-        cv.imshow(outCanvas, drawMat); // Muestra el drawMat en el outCanvas
-        if (!drawMat.isDeleted()) drawMat.delete(); // Borra el clon
-
+        cv.imshow(outCanvas, drawMat);
+        if (!drawMat.isDeleted()) drawMat.delete();
         return outCanvas;
-
     } catch (error) {
         console.error("Error en ALPR.drawPredictions:", error);
         return null;
     } finally {
-        // Borrar el mat principal que _prepareImageInputs pudo haber creado
         if (prep && prep.createdMat && !prep.createdMat.isDeleted()) {
             prep.createdMat.delete();
         }
-        // Si srcMatForDrawing era el frameInput original (cv.Mat), no se borra aquí.
     }
   }
 }
 
-// No es necesario exportar BoundingBox y DetectionResult aquí
-// si se van a consumir desde plateDetector.js.
-// ALPRResult y OcrResult son específicas de este módulo, así que su exportación aquí está bien.
-
-// Exportar para uso con módulos
-
+// Exportar las clases que se necesiten externamente
 export {
-
-  ALPR,
+  ALPR, // export default ya lo hace, pero por consistencia con las otras si las necesitaras
   OcrResult,
   BaseDetector,
   BaseOCR,
   DefaultDetector,
   DefaultOCR,
   ALPRResult
-
 };

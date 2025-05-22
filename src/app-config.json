@@ -6,9 +6,9 @@
   },
   "paths": {
     "baseModelsPath": "./models/",
-    "detectorModelsSubPath": "models-detection/",
+    "detectorModelsSubPath": "models-detection",
     "ocrModelsSubPath": "models-ocr/",
-    "ocrConfigsSubPath": ""
+    "ocrConfigsSubPath": "models-ocr/configs/"
   },
   "detectors": {
     "yolov9_t_256": {
@@ -38,10 +38,10 @@
   },
   "ocrModels": {
     "global_plates_mobile_vit_v2": {
-      "name": "Global Plates MobileViT v2",
-      "hubName": "global-plates-mobile-vit-v2-model",
-      "modelFileName": null,
-      "configFileName": "global_mobile_vit_v2_ocr_config.json"
+      "name": "Global Plates MobileViT v2 (JSON Config)",
+      "modelFileName": "global_mobile_vit_v2_ocr.onnx",
+      "configFileName": "global_mobile_vit_v2_ocr_config.json",
+      "description": "Modelo OCR MobileViT v2 para matrículas globales, con config JSON."
     }
   },
   "commonParameters": {

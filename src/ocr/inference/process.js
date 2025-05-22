@@ -1,4 +1,4 @@
-
+// src/ocr/inference/process.js
 
 /**
  * Objeto contenedor para las funciones de procesamiento OCR
@@ -7,231 +7,245 @@ export const OCRUtils = {
 
     /**
      * Lee una fuente de imagen y la convierte a escala de grises usando OpenCV.js.
-     * Reemplaza a read_plate_image de Python.
-     *
-     * @param {HTMLImageElement | HTMLCanvasElement | ImageData} imageSource - La fuente de la imagen (ya cargada).
-     * @returns {cv.Mat | null} La imagen como un objeto cv.Mat en escala de grises, o null si OpenCV no está listo.
+     * @param {HTMLImageElement | HTMLCanvasElement | ImageData | OffscreenCanvas | cv.Mat} imageSource
+     * @returns {cv.Mat | null} La imagen como un objeto cv.Mat en escala de grises.
      * @throws {Error} Si la fuente de la imagen no es válida o cv no está inicializado.
      */
     loadImageAndConvertToGrayscale: function(imageSource) {
         if (!cv || !cv.imread) {
-            throw new Error("OpenCV.js no está listo o no se encontró.");
+            throw new Error("OpenCV.js no está listo o cv.imread no se encontró.");
         }
 
         let mat;
-        try {
-            // cv.imread puede tomar un ID de elemento img/canvas o un elemento directamente
-            mat = cv.imread(imageSource);
-        } catch (err) {
-            console.error("Error al leer la imagen con cv.imread:", err);
-            throw new Error("Fuente de imagen inválida para cv.imread.");
+        let mustDeleteInitialMat = false;
+
+        if (imageSource instanceof cv.Mat) {
+            mat = imageSource; // El llamador debe decidir si clonar o no.
+                           // Para esta función, asumimos que si es un Mat, ya está listo.
+        } else if (imageSource instanceof ImageData ||
+                   imageSource instanceof OffscreenCanvas ||
+                  (typeof HTMLCanvasElement !== 'undefined' && imageSource instanceof HTMLCanvasElement) ||
+                  (typeof HTMLImageElement !== 'undefined' && imageSource instanceof HTMLImageElement)
+        ) {
+            try {
+                mat = cv.imread(imageSource); // imread puede manejar varios tipos
+                mustDeleteInitialMat = true;
+            } catch (err) {
+                console.error("Error al leer la imagen con cv.imread:", err, imageSource);
+                throw new Error(`Fuente de imagen inválida para cv.imread: ${err.message}`);
+            }
+        } else {
+            throw new Error(`Tipo de imageSource no soportado: ${imageSource ? imageSource.constructor.name : imageSource}`);
         }
 
-        if (mat.empty()) {
-             console.warn("cv.imread devolvió un Mat vacío.");
-             mat.delete(); // Liberar memoria si se creó un Mat vacío
+
+        if (!mat || mat.empty()) {
+             console.warn("cv.imread (o el Mat de entrada) devolvió un Mat vacío.");
+             if (mat && mustDeleteInitialMat && !mat.isDeleted()) mat.delete();
              return null;
         }
 
         let matGray = new cv.Mat();
-        // Convertir a escala de grises. Asume que la entrada es RGBA o RGB.
-        if (mat.channels() === 4) {
-            cv.cvtColor(mat, matGray, cv.COLOR_RGBA2GRAY);
+        if (mat.channels() === 1) {
+             matGray = mat.clone(); // Ya está en escala de grises, clonar para no modificar original
         } else if (mat.channels() === 3) {
-            cv.cvtColor(mat, matGray, cv.COLOR_RGB2GRAY);
-        } else if (mat.channels() === 1) {
-             // Ya está en escala de grises (o es un formato inesperado)
-             // Clonamos para asegurar que matGray sea independiente
-             matGray = mat.clone();
-             console.log("La imagen ya parece estar en escala de grises.");
+            cv.cvtColor(mat, matGray, cv.COLOR_RGB2GRAY); // Asume RGB si es canvas/image
+        } else if (mat.channels() === 4) {
+            cv.cvtColor(mat, matGray, cv.COLOR_RGBA2GRAY);
         } else {
-            console.error(`Formato de canal no soportado: ${mat.channels()}`);
-            mat.delete();
+            if (mustDeleteInitialMat && !mat.isDeleted()) mat.delete();
+            if (!matGray.isDeleted()) matGray.delete();
             throw new Error(`Formato de canal no soportado: ${mat.channels()}`);
         }
 
-        mat.delete(); // Liberar memoria de la imagen original a color/rgba
-        return matGray;
+        if (mustDeleteInitialMat && !mat.isDeleted()) {
+            mat.delete();
+        }
+        return matGray; // El llamador es responsable de borrar este matGray
     },
 
     /**
      * Preprocesa la(s) imagen(es) en escala de grises para el modelo OCR.
-     * Equivalente a preprocess_image de Python.
-     *
-     * @param {cv.Mat | cv.Mat[]} imageInput - Una imagen cv.Mat (escala de grises) o un array de ellas.
-     * @param {number} imgHeight - La altura deseada para el redimensionamiento.
-     * @param {number} imgWidth - El ancho deseado para el redimensionamiento.
-     * @returns {{data: Float32Array, shape: number[]}} Un objeto con los datos preprocesados como Float32Array plano
-     * y la forma [N, H, W, 1].
-     * @throws {Error} Si la entrada es inválida o cv no está inicializado.
+     * @param {cv.Mat[]} grayMats - Un array de imágenes cv.Mat (escala de grises).
+     * @param {number} targetImgHeight - La altura deseada del modelo OCR.
+     * @param {number} targetImgWidth - El ancho deseado del modelo OCR.
+     * @param {number} expectedChannels - Canales esperados por el modelo (ej. 1 para gris, 3 para RGB).
+     * @returns {{data: Float32Array, shape: number[]}} Objeto con datos y forma [N, C, H, W].
      */
-    preprocessImage: function(imageInput, imgHeight, imgWidth) {
+    preprocessOcrInputs: function(grayMats, targetImgHeight, targetImgWidth, expectedChannels = 1) {
         if (!cv || !cv.resize) {
-            throw new Error("OpenCV.js no está listo o no se encontró.");
+            throw new Error("OpenCV.js no está listo.");
+        }
+        if (!Array.isArray(grayMats) || grayMats.length === 0) {
+            throw new Error("La entrada debe ser un array de cv.Mat no vacío.");
         }
 
-        const images = Array.isArray(imageInput) ? imageInput : [imageInput]; // Asegurar que sea un array
-        if (images.length === 0 || !images[0] || images[0].empty()) {
-            throw new Error("La entrada de imagen está vacía o es inválida.");
-        }
-
-        const batchSize = images.length;
-        const targetShape = [batchSize, imgHeight, imgWidth, 1];
-        const totalPixels = batchSize * imgHeight * imgWidth;
-        // Los modelos suelen esperar Float32, aunque no normalicemos aquí.
-        const processedData = new Uint8Array(totalPixels); // <--- CAMBIAR a Uint8Array
+        const batchSize = grayMats.length;
+        // El formato de tensor común es NCHW (Batch, Channels, Height, Width)
+        const C = expectedChannels;
+        const H = targetImgHeight;
+        const W = targetImgWidth;
+        const targetShape = [batchSize, C, H, W];
+        const tensorData = new Float32Array(batchSize * C * H * W);
 
         let offset = 0;
-        const dsize = new cv.Size(imgWidth, imgHeight);
-        const tempResized = new cv.Mat(); // Reutilizar para eficiencia
+        const dsize = new cv.Size(W, H);
+        let tempResized = new cv.Mat();
+        let matToProcess = new cv.Mat();
 
         try {
             for (let i = 0; i < batchSize; i++) {
-                const img = images[i];
-                if (img.empty() || img.channels() !== 1) {
-                    console.error(`Imagen inválida en el índice ${i}: ¿está vacía o no es escala de grises? Canales: ${img.channels()}`);
-                    continue; // O lanzar un error
+                const grayMat = grayMats[i];
+                if (!grayMat || grayMat.empty()) {
+                    throw new Error(`Imagen inválida en el índice ${i}: está vacía.`);
+                }
+                if (grayMat.channels() !== 1) {
+                     throw new Error(`Imagen en el índice ${i} no está en escala de grises (canales: ${grayMat.channels()}).`);
                 }
 
-                // Redimensionar
-                // cv.INTER_LINEAR es la interpolación por defecto en muchos casos, coincide con Python
-                cv.resize(img, tempResized, dsize, 0, 0, cv.INTER_LINEAR);
+                cv.resize(grayMat, tempResized, dsize, 0, 0, cv.INTER_LINEAR);
 
-                // Obtener datos y añadirlos al array plano Float32
-                const imageData = tempResized.data; // Esto es Uint8Array para CV_8UC1
-                for (let j = 0; j < imageData.length; j++) {
-                    processedData[offset + j] = imageData[j]; // Copiar valor 0-255 como float
+                // Convertir a 'expectedChannels' si es necesario y normalizar
+                if (expectedChannels === 1) { // Modelo espera entrada en escala de grises
+                    tempResized.convertTo(matToProcess, cv.CV_32F, 1.0 / 255.0); // Normaliza a [0,1]
+                } else if (expectedChannels === 3) { // Modelo espera entrada a color (desde gris)
+                    let colorMat = new cv.Mat();
+                    cv.cvtColor(tempResized, colorMat, cv.COLOR_GRAY2RGB); // o BGR según el modelo
+                    colorMat.convertTo(matToProcess, cv.CV_32F, 1.0 / 255.0);
+                    colorMat.delete();
+                } else {
+                    throw new Error(`Número de canales esperados (${expectedChannels}) no soportado para preprocesamiento OCR.`);
                 }
-                offset += imageData.length; // Avanzar el offset por el número de píxeles de una imagen
+
+                // Copiar datos al tensor en formato NCHW
+                const floatData = matToProcess.data32F; // Acceder a los datos Float32
+                for (let c = 0; c < C; c++) {
+                    for (let h = 0; h < H; h++) {
+                        for (let w = 0; w < W; w++) {
+                            // Si C=1, el índice es h * W + w
+                            // Si C=3, el índice es (h * W + w) * C + c (si los datos están interleaved)
+                            // O si OpenCV lo devuelve plano por canal, ajustar.
+                            // Asumiendo que matToProcess.data32F está en formato HWC
+                            let val;
+                            if (C === 1) {
+                                val = floatData[h * W + w];
+                            } else { // C === 3
+                                val = floatData[(h * W + w) * C + c]; // HWC
+                            }
+                            tensorData[offset + c * (H * W) + h * W + w] = val;
+                        }
+                    }
+                }
+                offset += C * H * W; // Avanzar para el siguiente item del batch
             }
         } finally {
-             // Asegurarse de liberar memoria del Mat temporal
-            tempResized.delete();
+            if (!tempResized.isDeleted()) tempResized.delete();
+            if (!matToProcess.isDeleted()) matToProcess.delete();
         }
-
-
-        // Importante: Si usaste cv.Mat que no eran del array original `images`,
-        // asegúrate de liberar su memoria (ej. con mat.delete()) si no los necesitas más.
-
-        return { data: processedData, shape: targetShape };
+        return { data: tensorData, shape: targetShape };
     },
 
     /**
-     * Post-procesa la salida del modelo OCR para obtener las cadenas de texto.
-     * Equivalente a postprocess_output de Python.
-     *
-     * @param {Float32Array | number[]} modelOutputData - Array plano con la salida del modelo.
-     * @param {number[]} outputShape - La forma del tensor de salida (ej. [Batch, Timesteps, AlphabetSize]).
-     * Se espera que Timesteps sea igual a maxPlateSlots.
-     * @param {number} maxPlateSlots - Número máximo de caracteres/slots en la matrícula (debe coincidir con outputShape[1]).
-     * @param {string} modelAlphabet - Cadena con los caracteres posibles en el orden esperado por el modelo.
-     * @param {boolean} [returnConfidence=false] - Si es true, retorna también las probabilidades máximas.
-     * @returns {string[] | [string[], number[][]]} Un array de strings (matrículas decodificadas).
-     * Si returnConfidence es true, retorna [plates, probabilities], donde probabilities
-     * es un array de arrays con las confianzas para cada slot [N, max_plate_slots].
-     * @throws {Error} Si las dimensiones de entrada son inconsistentes.
+     * Post-procesa la salida del modelo OCR.
+     * @param {Float32Array | Int32Array | Uint8Array} modelOutputData - Salida del modelo.
+     * @param {number[]} outputShape - Forma de la salida (ej. [Batch, Timesteps, AlphabetSize]).
+     * @param {number} maxPlateSlots - Max slots (debe coincidir con Timesteps).
+     * @param {string} modelAlphabet - Alfabeto del modelo.
+     * @param {boolean} [returnConfidence=false] - Si retorna confianzas.
+     * @returns { [string[], (number[][] | undefined)] } Array de matrículas. Si returnConfidence, [placas, probs].
      */
-    postprocessOutput: function(
+    postprocessOcrOutput: function(
         modelOutputData,
         outputShape,
-        maxPlateSlots,
+        maxPlateSlots, // Este es el 'sequence_length' o 'timesteps'
         modelAlphabet,
         returnConfidence = false
     ) {
+        // ... (Tu lógica de postprocessOutput existente era bastante buena)
+        // Asegúrate que la lógica de indexación para `modelOutputData`
+        // corresponda con el `outputShape` real que tu modelo OCR produce.
+        // La decodificación CTC (si es un modelo tipo CRNN) es más compleja que un simple argmax por slot.
+        // El ejemplo anterior de CTC decode era un placeholder.
+        // Si tu modelo NO es CTC y simplemente predice un carácter por slot:
+
         if (!Array.isArray(outputShape) || (outputShape.length !== 3 && outputShape.length !== 2)) {
-            // Permitimos [Batch, Slots*Alphabet] o [Batch, Slots, Alphabet]
             throw new Error(`outputShape inválido. Se esperaban 2 o 3 dimensiones, se obtuvieron ${outputShape?.length} (${outputShape})`);
         }
 
+        let batchSize, slots, alphabetSizeReal;
+        const alphabetArray = modelAlphabet.split('');
+        alphabetSizeReal = alphabetArray.length; // Tamaño real del alfabeto que pasaste
 
-        let batchSize, slots, alphabetSize;
-        let expectedLength;
-
-        const alphabetArray = modelAlphabet.split(''); // Convertir string a array de caracteres
-        alphabetSize = alphabetArray.length;
-
-        if (outputShape.length === 3) {
-             // Formato [Batch, Slots, AlphabetSize]
+        if (outputShape.length === 3) { // [Batch, Slots/Timesteps, NumClasses]
             batchSize = outputShape[0];
             slots = outputShape[1];
-            if (outputShape[2] !== alphabetSize) {
-                 throw new Error(`El tamaño del alfabeto en la forma (${outputShape[2]}) no coincide con modelAlphabet (${alphabetSize})`);
+            if (outputShape[2] !== alphabetSizeReal) {
+                 console.warn(`Tamaño del alfabeto en outputShape (${outputShape[2]}) no coincide con modelAlphabet (${alphabetSizeReal}). Asumiendo ${outputShape[2]}.`);
+                 // alphabetSizeReal = outputShape[2]; // Podrías usar el de la forma si confías más en él
             }
-            if (slots !== maxPlateSlots) {
-                console.warn(`maxPlateSlots (${maxPlateSlots}) no coincide con la dimensión de slots en la forma (${slots}). Usando ${slots}.`);
-                maxPlateSlots = slots; // Ajustar al valor real de la salida
+        } else { // outputShape.length === 2 asumiendo [Batch, Slots * NumClasses]
+            batchSize = outputShape[0];
+            const combinedDim = outputShape[1];
+            if (combinedDim % alphabetSizeReal !== 0) {
+                 throw new Error(`Segunda dimensión (${combinedDim}) no es divisible por tamaño del alfabeto (${alphabetSizeReal})`);
             }
-            expectedLength = batchSize * slots * alphabetSize;
-        } else { // outputShape.length === 2
-            // Formato [Batch, Slots * AlphabetSize]
-             batchSize = outputShape[0];
-             const combinedDim = outputShape[1];
-             if (combinedDim % alphabetSize !== 0) {
-                 throw new Error(`La segunda dimensión (${combinedDim}) no es divisible por el tamaño del alfabeto (${alphabetSize})`);
-             }
-             slots = combinedDim / alphabetSize;
-
-              console.log(`Postprocessing - BatchSize: ${batchSize}, Slots: ${slots}, AlphabetSize: ${alphabetSize}`);
-    console.log(`Postprocessing - maxPlateSlots recibido: ${maxPlateSlots}`); // Verifica si coincide con 'slots'
-
-              if (slots !== maxPlateSlots) {
-                console.warn(`maxPlateSlots (${maxPlateSlots}) calculado de la forma (${slots}) no coincide con el parámetro. Usando ${slots}.`);
-                maxPlateSlots = slots; // Ajustar al valor real de la salida
-            }
-            expectedLength = batchSize * slots * alphabetSize;
+            slots = combinedDim / alphabetSizeReal;
         }
 
+        if (slots !== maxPlateSlots) {
+            console.warn(`maxPlateSlots (${maxPlateSlots}) no coincide con slots inferidos/reales de la salida del modelo (${slots}). Usando ${slots}.`);
+            maxPlateSlots = slots; // Usar el valor real de la salida
+        }
 
+        const expectedLength = batchSize * maxPlateSlots * alphabetSizeReal;
         if (modelOutputData.length !== expectedLength) {
-            throw new Error(`Longitud de modelOutputData (${modelOutputData.length}) no coincide con la esperada por la forma (${expectedLength}). Shape: [${outputShape.join(', ')}]`);
+            // Puede que el tensor esté aplanado de forma diferente o sea una forma inesperada.
+            console.error("Forma de salida y datos no coinciden:", outputShape, modelOutputData.length, expectedLength);
+            throw new Error(`Longitud de modelOutputData (${modelOutputData.length}) no coincide con esperada (${expectedLength}) para forma [${outputShape.join(', ')}] y alfabeto de ${alphabetSizeReal}`);
         }
+
 
         const plates = [];
-        const probabilities = returnConfidence ? [] : null;
+        const probabilitiesList = returnConfidence ? [] : undefined;
 
         for (let b = 0; b < batchSize; b++) {
             let currentPlate = '';
-            const currentProbs = returnConfidence ? [] : null;
+            const currentProbs = returnConfidence ? [] : undefined;
 
             for (let s = 0; s < maxPlateSlots; s++) {
                 let maxProb = -Infinity;
                 let maxIndex = -1;
+                const slotOffset = (b * maxPlateSlots + s) * alphabetSizeReal;
 
-                // Encontrar argmax y max en la dimensión del alfabeto para este slot [b, s]
-                for (let k = 0; k < alphabetSize; k++) {
-                    // Calcular el índice en el array plano
-                    const dataIndex = b * maxPlateSlots * alphabetSize + s * alphabetSize + k;
-                    const prob = modelOutputData[dataIndex];
-
+                for (let k = 0; k < alphabetSizeReal; k++) {
+                    const prob = modelOutputData[slotOffset + k];
                     if (prob > maxProb) {
                         maxProb = prob;
                         maxIndex = k;
                     }
                 }
 
-                if (maxIndex !== -1) {
-                    currentPlate += alphabetArray[maxIndex]; // Añadir el caracter decodificado
-                    if (returnConfidence) {
-                        currentProbs.push(maxProb); // Guardar la probabilidad máxima
+                if (maxIndex !== -1 && maxIndex < alphabetArray.length) { // Asegurar que el índice es válido
+                    const char = alphabetArray[maxIndex];
+                    // Lógica para manejar el carácter 'blank' o de padding si es un modelo CTC-like o similar
+                    // Por ejemplo, si tu 'pad_char' (ej. '_') está en el alfabeto y no debe incluirse:
+                    if (char !== '_' ) { // Asumiendo que '_' es el pad_char y no quieres que aparezca.
+                                        // O si es un modelo CTC, aquí iría la lógica de colapso.
+                        currentPlate += char;
+                    }
+                    if (returnConfidence && currentProbs) {
+                        currentProbs.push(maxProb);
                     }
                 } else {
-                    // Caso improbable si alphabetSize > 0, pero por seguridad
-                    currentPlate += '?'; // O algún carácter placeholder
-                     if (returnConfidence) {
-                        currentProbs.push(0);
-                    }
+                    // Opcional: manejar el caso de índice inválido, aunque no debería ocurrir.
+                    if (returnConfidence && currentProbs) currentProbs.push(0);
                 }
-            } // Fin loop slots (s)
-
-            plates.push(currentPlate);
-            if (returnConfidence) {
-                probabilities.push(currentProbs);
             }
-        } // Fin loop batches (b)
-
-        if (returnConfidence) {
-            return [plates, probabilities];
+            plates.push(currentPlate);
+            if (returnConfidence && probabilitiesList && currentProbs) {
+                probabilitiesList.push(currentProbs);
+            }
         }
-        return plates;
+        return returnConfidence ? [plates, probabilitiesList] : plates;
     }
 };

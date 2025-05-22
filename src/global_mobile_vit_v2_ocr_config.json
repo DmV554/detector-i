@@ -1,7 +1,0 @@
-{
-  "max_plate_slots": 9,
-  "alphabet": "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_",
-  "pad_char": "_",
-  "img_height": 70,
-  "img_width": 140
-}

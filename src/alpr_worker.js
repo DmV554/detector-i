@@ -1,249 +1,253 @@
 // alpr_worker.js
 
-// 1. Importar ONNX Runtime como un módulo ES6 desde la carpeta libs
-// Asegúrate que la ruta './libs/onnxruntime-web/dist/ort.mjs' sea correcta.
-// Podría ser ort.min.mjs, ort.all.mjs, etc., dependiendo del archivo específico que uses.
-import * as ortNS from './libs/onnxruntime-web/dist/ort.mjs';
+// Importar ONNX Runtime y ALPR
+import * as ortNS from './libs/onnxruntime-web/dist/ort.mjs'; // Ajusta la ruta si es necesario
 self.ort = ortNS; // Hacer ONNX Runtime disponible globalmente como self.ort
 
-// Variables para el estado de carga y la instancia de ALPR
-let ALPR; // Se importará dinámicamente
+import ALPR from './alpr/src/alpr.js'; // ALPR debe ser la clase exportada por defecto
+
 let alprInstance = null;
-let cvReady = false;
+let cvReady = false; // Se volverá true cuando OpenCV esté completamente listo
 let ortReady = false;
-let openCVLoadSuccess = false;
-const heightModelInput = 256;
-const widthModelInput = 256;
+let currentAppConfig = null;
 
-// 2. Función para cargar OpenCV.js
-// Se llamará antes de cualquier inicialización que dependa de OpenCV.
-async function loadOpenCV() {
-  try {
-    const response = await fetch('./libs/opencv-js/dist/opencv.js'); // Carga el script
-    if (!response.ok) {
-      throw new Error(`Error HTTP cargando OpenCV! status: ${response.status}`);
-    }
-    const scriptText = await response.text();
-    // Ejecuta el script en el ámbito global del worker.
-    // new Function(scriptText).call(self) intenta asegurar que 'this' dentro del script sea 'self'.
-    new Function(scriptText).call(self);
-
-    // Verifica si 'cv' se definió globalmente. Emscripten (OpenCV.js) usualmente lo hace.
-    if (typeof cv === 'undefined') {
-      throw new Error("'cv' no está definido globalmente después de ejecutar opencv.js. Verifica el archivo opencv.js.");
-    }
-    console.info("ALPR Worker: OpenCV.js obtenido y ejecutado localmente.");
-    return true; // Indica éxito
-  } catch (e) {
-    console.error("ALPR Worker: Fallo crítico al cargar o ejecutar opencv.js local.", e);
-    // Envía un mensaje de error al hilo principal.
-    postMessage({ type: 'initError', error: `Fallo al cargar/ejecutar opencv.js local: ${e.message || String(e)}` });
-    return false; // Indica fallo
-  }
-}
-
-// 3. Función para configurar las variables globales y esperar a que las bibliotecas estén listas
-async function setupGlobals() {
-    // Configurar ONNX Runtime (ya debería estar disponible como self.ort)
-    try {
-        if (typeof self.ort === 'undefined' || typeof self.ort.InferenceSession === 'undefined') {
-            postMessage({ type: 'initError', error: 'ONNX Runtime (self.ort) no inicializado correctamente.' });
-            return false;
+/**
+ * Carga y espera la inicialización completa de OpenCV.js.
+ * Retorna una promesa que se resuelve cuando OpenCV está listo, o se rechaza si falla.
+ */
+async function loadAndInitializeOpenCV() {
+    return new Promise(async (resolve, reject) => {
+        if (cvReady) { // Si por alguna razón ya está listo
+            console.info("ALPR Worker: OpenCV ya estaba marcado como listo.");
+            resolve(true);
+            return;
         }
-        self.ort.env.wasm.numThreads = Math.max(1, Math.min(navigator.hardwareConcurrency || 2, 2));
-        self.ort.env.wasm.simd = true; // Habilitar SIMD si tus archivos wasm lo soportan (ej. ort-wasm-simd.wasm)
 
-        // === CAMBIO CRÍTICO ===
-        // Elimina o comenta la siguiente línea para permitir que ONNX Runtime
-        // use su comportamiento predeterminado para encontrar los archivos .wasm.
-        // Por defecto, los busca en el mismo directorio que el archivo ort.mjs principal.
-        // self.ort.env.wasm.wasmPaths = './'; // Comentar o eliminar esta línea
-
-        // Si necesitas explícitamente que busque en la carpeta dist (donde está ort.mjs y sus hermanos .wasm)
-        // y tu worker está en la raíz, la ruta correcta sería:
-        // self.ort.env.wasm.wasmPaths = './libs/onnxruntime-web/dist/';
-        // PERO, para probar el default, primero comenta/elimina cualquier asignación a wasmPaths.
-        // Si el default no funciona, la línea anterior podría ser la correcta.
-
-        console.info(`ALPR Worker: ONNX Runtime configurado. Hilos: ${self.ort.env.wasm.numThreads}, SIMD: ${self.ort.env.wasm.simd}. Wasm Paths: (usando predeterminado o ruta específica).`);
-        ortReady = true;
-    } catch (e) {
-        console.error("ALPR Worker: Error configurando ONNX Runtime:", e);
-        postMessage({ type: 'initError', error: `Error configurando ORT: ${e.message}` });
-        return false;
-    }
-
-    // Configurar OpenCV.js (esto permanece igual que en la respuesta anterior)
-    if (!openCVLoadSuccess) {
-        postMessage({ type: 'initError', error: 'OpenCV no se cargó previamente con éxito.' });
-        return false;
-    }
-
-    return new Promise((resolve) => {
+        // Comprobar si 'cv' ya existe y está funcional (ej. si el worker se reutiliza y ya cargó)
         if (typeof cv !== 'undefined' && cv.Mat) {
-            if (cv.onRuntimeInitialized && typeof cv.onRuntimeInitialized === 'function') {
+            console.info("ALPR Worker: OpenCV (cv.Mat) parece estar ya disponible y funcional.");
+            cvReady = true;
+            resolve(true);
+            return;
+        }
+
+        console.info("ALPR Worker: Intentando cargar y ejecutar opencv.js...");
+        try {
+            const response = await fetch('./libs/opencv-js/dist/opencv.js'); // Asegúrate que la ruta sea correcta
+            if (!response.ok) {
+                throw new Error(`Error HTTP ${response.status} cargando OpenCV.js desde ${response.url}`);
+            }
+            const scriptText = await response.text();
+            // Ejecutar el script de OpenCV en el contexto global del worker
+            // Es crucial que el script de OpenCV se ejecute correctamente aquí
+            // y defina el objeto 'cv' global y su callback 'onRuntimeInitialized'.
+            new Function(scriptText).call(self);
+
+            if (typeof cv === 'undefined') {
+                throw new Error("'cv' no está definido globalmente después de ejecutar el script de opencv.js. Verifica el contenido y la carga del script.");
+            }
+            console.info("ALPR Worker: opencv.js script ejecutado. Esperando inicialización del runtime WASM...");
+
+            // Esperar a que el runtime de OpenCV (WASM) esté completamente listo
+            if (typeof cv.onRuntimeInitialized === 'function') {
                 cv.onRuntimeInitialized = () => {
-                    console.info("ALPR Worker: OpenCV.js Runtime Inicializado (vía callback).");
+                    if (cvReady) return; // Prevenir múltiples resoluciones
+                    console.info("ALPR Worker: OpenCV.js Runtime Inicializado (vía callback cv.onRuntimeInitialized).");
                     cvReady = true;
                     resolve(true);
                 };
             } else {
-                console.info("ALPR Worker: OpenCV.js parece listo (sin callback onRuntimeInitialized o no es una función).");
-                cvReady = true;
-                resolve(true);
-            }
-        } else {
-            let retries = 0;
-            const maxRetries = 20;
-            const cvPollInterval = setInterval(() => {
-                if (typeof cv !== 'undefined' && cv.Mat) {
-                    clearInterval(cvPollInterval);
-                    console.info("ALPR Worker: OpenCV.js (cv.Mat) detectado tras sondeo en setupGlobals.");
-                    if (cv.onRuntimeInitialized && typeof cv.onRuntimeInitialized === 'function') {
-                         cv.onRuntimeInitialized = () => {
-                            console.info("ALPR Worker: OpenCV.js Runtime Inicializado (vía callback después de sondeo en setupGlobals).");
-                            cvReady = true;
-                            resolve(true);
-                        };
-                    } else {
+                // Fallback: Si onRuntimeInitialized no es una función (versiones antiguas/diferentes de OpenCV.js)
+                // Intentar un sondeo para cv.Mat como indicador de que está listo.
+                console.warn("ALPR Worker: cv.onRuntimeInitialized no es una función. Iniciando sondeo para cv.Mat...");
+                let retries = 0;
+                const maxRetries = 50; // Aumentar intentos (ej. 5 segundos si el intervalo es 100ms)
+                const intervalId = setInterval(() => {
+                    if (typeof cv !== 'undefined' && cv.Mat) {
+                        clearInterval(intervalId);
+                        if (cvReady) return; // Prevenir múltiples resoluciones
+                        console.info("ALPR Worker: OpenCV.js (cv.Mat) detectado como disponible tras sondeo.");
                         cvReady = true;
                         resolve(true);
+                    } else if (++retries > maxRetries) {
+                        clearInterval(intervalId);
+                        const errorMsg = 'OpenCV.js (cv.Mat) no disponible después de sondeo prolongado. El runtime WASM podría no haberse cargado o inicializado.';
+                        console.error("ALPR Worker:", errorMsg);
+                        reject(new Error(errorMsg));
                     }
-                } else if (++retries > maxRetries) {
-                    clearInterval(cvPollInterval);
-                    console.error("ALPR Worker: OpenCV.js (cv.Mat) no disponible tras sondeo en setupGlobals.");
-                    postMessage({ type: 'initError', error: 'OpenCV.js (cv.Mat) no disponible después del sondeo.' });
-                    resolve(false);
-                }
-            }, 100);
+                }, 100);
+            }
+        } catch (error) {
+            console.error("ALPR Worker: Fallo crítico durante la carga o inicialización de OpenCV.js:", error);
+            postMessage({ type: 'initError', error: `Fallo crítico en OpenCV: ${error.message || String(error)}` });
+            reject(error);
         }
     });
 }
 
-// 4. Función para inicializar la instancia de ALPR
-async function initializeAlpr(detectorModel, ocrModelName) {
-    console.info(`ALPR Worker: Iniciando ALPR. Detector: ${detectorModel}, OCR: ${ocrModelName}`);
-    if (!ortReady || !cvReady) {
-        const errorMsg = `ALPR no puede inicializar: ORT listo=${ortReady}, CV listo=${cvReady}`;
-        console.error("ALPR Worker:", errorMsg);
-        return false;
-    }
-    if (!ALPR) { // Asegurarse que el módulo ALPR fue cargado
-        console.error("ALPR Worker: El módulo ALPR no está cargado.");
-        return false;
-    }
 
+async function setupOrtEnvironment() {
     try {
-        alprInstance = new ALPR({ // ALPR se importa dinámicamente
-            detectorModelsPath: "./models",
-            detectorModel: detectorModel,
-            ocrModel: ocrModelName,
-            heightModelInput: heightModelInput,
-            widthModelInput: widthModelInput,
-        });
-
-        // Carga de los modelos internos de ONNX (detector y OCR)
-        if (alprInstance && alprInstance.detector && alprInstance.detector.detector) {
-            if (!alprInstance.detector.detector.modelLoaded) {
-                console.info("ALPR Worker: Cargando modelo de detector...");
-                await alprInstance.detector.detector.loadModel(heightModelInput, widthModelInput);
-            }
-        } else {
-            throw new Error("Instancia del detector (YoloV9ObjectDetector) no encontrada en ALPR.");
+        if (typeof self.ort === 'undefined' || typeof self.ort.InferenceSession === 'undefined') {
+            throw new Error('ONNX Runtime (self.ort) no disponible o no es un módulo válido.');
         }
+        self.ort.env.wasm.numThreads = Math.max(1, Math.min(navigator.hardwareConcurrency || 2, 4));
+        self.ort.env.wasm.simd = true;
 
-        if (alprInstance && alprInstance.ocr && alprInstance.ocr.ocrModel) {
-            if (!alprInstance.ocr.ocrModel.isInitialized) {
-                console.info(`ALPR Worker: Inicializando modelo OCR (${ocrModelName})...`);
-                await alprInstance.ocr.ocrModel.initialize(ocrModelName);
-            }
-        } else {
-            throw new Error("Instancia del reconocedor OCR (OnnxOcrRecognizer) no encontrada en ALPR.");
-        }
 
-        console.info("ALPR Worker: Instancia ALPR y modelos subyacentes listos.");
+        console.info(`ALPR Worker: Entorno WASM de ONNX Runtime configurado. Hilos: ${self.ort.env.wasm.numThreads}, SIMD: ${self.ort.env.wasm.simd}. WasmPaths: '${self.ort.env.wasm.wasmPaths}'`);
+        ortReady = true;
         return true;
-    } catch (error) {
-        console.error("ALPR Worker: Error al inicializar instancia ALPR o sus modelos:", error, error.stack);
-        alprInstance = null;
+    } catch (e) {
+        console.error("ALPR Worker: Error configurando entorno de ONNX Runtime:", e);
+        postMessage({ type: 'initError', error: `Error ORT env: ${e.message}` });
         return false;
     }
 }
 
-// 5. Manejador de mensajes del hilo principal
+// La función initializeAlprInstance permanece igual que en tu última versión.
+// Solo asegúrate que verifique cvReady y ortReady.
+async function initializeAlprInstance(workerInitPayload) {
+    currentAppConfig = workerInitPayload.appConfig;
+    const { selectedDetectorKey, selectedOcrKey, confThresh } = workerInitPayload;
+
+    if (!ortReady || !cvReady) { // Estas flags ahora son más confiables
+        const errorMsg = `ALPR no puede inicializar: ORT listo=${ortReady}, CV listo=${cvReady}`;
+        console.error("ALPR Worker:", errorMsg);
+        postMessage({ type: 'initComplete', payload: { success: false, error: errorMsg } });
+        return; // No continuar
+    }
+    if (!currentAppConfig) {
+        postMessage({ type: 'initComplete', payload: { success: false, error: "Configuración no recibida." } });
+        return;
+    }
+
+    try {
+        const detectorSettings = currentAppConfig.detectors[selectedDetectorKey];
+        const ocrSettings = currentAppConfig.ocrModels[selectedOcrKey];
+        const commonSettings = currentAppConfig.commonParameters;
+        const pathSettings = currentAppConfig.paths;
+
+        if (!detectorSettings) throw new Error(`Config para detector '${selectedDetectorKey}' no encontrada.`);
+        if (!ocrSettings) throw new Error(`Config para OCR '${selectedOcrKey}' no encontrada.`);
+
+        // Rutas: estas deben ser relativas a la ubicación del worker o absolutas en el servidor.
+        // Si app-config.json usa "./models/" y index.html está en la raíz del servidor (o en src/ y el servidor sirve src/ como raíz),
+        // y el worker está en `src/alpr_worker.js` (servido como `/alpr_worker.js` o `/src/alpr_worker.js`),
+        // entonces "./models/" desde la perspectiva del fetch en el worker será relativo a la ubicación del worker.
+        // Es más seguro si las rutas en app-config.json son rutas absolutas desde la raíz del servidor
+        // o si construyes rutas relativas al worker aquí.
+        // Ejemplo: si appConfig.paths.baseModelsPath es "./models/" (relativo a index.html/raíz del servidor)
+        // y el worker está en `src/alpr_worker.js`, la ruta desde el worker al modelo sería `../models/`.
+        // Vamos a asumir que las rutas en `app-config.json` (ej. "./models/") son relativas a la raíz del servidor.
+
+        const baseModelsPath = pathSettings.baseModelsPath; // ej: "./models/" (relativo a la raíz del servidor)
+
+        const detectorModelsFullPath = `${baseModelsPath}${pathSettings.detectorModelsSubPath}`; // ej: "./models/detection/"
+
+        let ocrModelFileFullPath = null;
+        if (ocrSettings.modelFileName) {
+            ocrModelFileFullPath = `${baseModelsPath}${pathSettings.ocrModelsSubPath}${ocrSettings.modelFileName}`;
+        }
+        let ocrConfigFullPath = null;
+        if (ocrSettings.configFileName) {
+             ocrConfigFullPath = pathSettings.ocrConfigsSubPath ?
+                `${baseModelsPath}${pathSettings.ocrConfigsSubPath}${ocrSettings.configFileName}` :
+                `${baseModelsPath}${ocrSettings.configFileName}`; // Si ocrConfigsSubPath es ""
+             // Si tu global_mobile_vit_v2_ocr_config.json está en src/ y no en models/ocr/configs/
+             // entonces app-config.json debería reflejarlo, o ajusta la ruta aquí.
+             // Por ejemplo, si configFileName es "global_mobile_vit_v2_ocr_config.json"
+             // y está en la raíz del proyecto servido: ocrConfigFullPath = `./${ocrSettings.configFileName}`;
+             console.log("Ruta config OCR construida a pasar a ALPR:", ocrConfigFullPath);
+        }
+
+
+        alprInstance = new ALPR({
+            detectorModel: detectorSettings.fileName,
+            detectorConfThresh: confThresh,
+            detectorModelsPath: detectorModelsFullPath, // Ruta a la carpeta de modelos de detección
+            heightInput: detectorSettings.inputHeight,
+            widthInput: detectorSettings.inputWidth,
+            detectorExecutionProviders: commonSettings.onnxExecutionProviders,
+
+            ocrModel: ocrSettings.hubName || ocrSettings.name,
+            ocrModelPath: ocrModelFileFullPath,
+            ocrConfigPath: ocrConfigFullPath,
+            ocrForceDownload: commonSettings.ocrForceDownload,
+            ocrExecutionProviders: commonSettings.onnxExecutionProviders
+        });
+
+        await alprInstance.init();
+        console.info("ALPR Worker: Instancia ALPR y modelos inicializados.");
+        postMessage({ type: 'initComplete', payload: { success: true } });
+
+    } catch (error) {
+        console.error("ALPR Worker: Error inicializando ALPR con config:", error, error.stack);
+        alprInstance = null;
+        postMessage({ type: 'initComplete', payload: { success: false, error: error.message } });
+    }
+}
+
+
 self.onmessage = async function (e) {
     const { type, payload, frameId } = e.data;
 
-    if (type === 'init') {
-        // Carga OpenCV primero, ya que es la dependencia más problemática
-        if (!openCVLoadSuccess) { // Solo intentar una vez o si falló antes
-            openCVLoadSuccess = await loadOpenCV();
-        }
+    switch (type) {
+        case 'INIT':
+            console.log("ALPR Worker: Recibido INIT, payload:", payload);
+            currentAppConfig = payload.appConfig;
 
-        if (!openCVLoadSuccess) {
-            // El mensaje de error ya fue enviado por loadOpenCV()
-            self.postMessage({ type: 'initComplete', success: false, error: 'Fallo crítico al cargar OpenCV (reportado desde onmessage).' });
-            return; // No continuar si OpenCV falló
-        }
-
-        // Importar dinámicamente ALPR *después* de que OpenCV se haya cargado (o intentado cargar)
-        // Esto es crucial porque ALPR o sus dependencias (fast-plate-ocr-js, etc.)
-        // pueden intentar usar 'cv' tan pronto como se evalúa el módulo.
-        if (!ALPR) { // Solo importar si aún no se ha hecho
             try {
-                const alprModule = await import('./alpr/src/alpr.js');
-                ALPR = alprModule.ALPR; // Asigna la clase ALPR exportada
-                if (!ALPR) {
-                    throw new Error("La clase ALPR no se encontró en el módulo importado 'fastalprjs/src/alpr.js'.");
+                const ortEnvOk = await setupOrtEnvironment();
+                if (!ortEnvOk) {
+                    // El mensaje de error ya se envió desde setupOrtEnvironment
+                    postMessage({ type: 'initComplete', payload: { success: false, error: 'Fallo configurando entorno ORT (detalle en log anterior).' } });
+                    return;
                 }
-            } catch (moduleError) {
-                console.error("ALPR Worker: Fallo al importar dinámicamente ALPR.js.", moduleError);
-                postMessage({ type: 'initError', error: `Fallo al importar ALPR.js: ${moduleError.message}` });
-                self.postMessage({ type: 'initComplete', success: false, error: 'Fallo al importar el módulo ALPR.js.' });
+
+                // Cargar e inicializar OpenCV. Esta función ahora maneja la espera y errores.
+                await loadAndInitializeOpenCV(); // Esto establece cvReady si tiene éxito, o rechaza.
+
+                // Si llegamos aquí y cvReady es true (y ortReady es true), entonces inicializar ALPR.
+                if (ortReady && cvReady) {
+                    await initializeAlprInstance(payload);
+                } else {
+                    // Si cvReady no es true, loadAndInitializeOpenCV debe haber rechazado y enviado un mensaje.
+                    // Este es un fallback.
+                    const libError = !ortReady ? 'ORT no listo.' : (!cvReady ? 'OpenCV no listo (después del intento de carga).' : 'Bibliotecas desconocidas no listas.');
+                    console.error("ALPR Worker: No se pudo proceder a initializeAlprInstance.", libError);
+                    postMessage({ type: 'initComplete', payload: { success: false, error: `Fallo en la carga de bibliotecas: ${libError}` } });
+                }
+            } catch (initProcessError) {
+                // Capturar errores de loadAndInitializeOpenCV si la promesa es rechazada
+                console.error("ALPR Worker: Error durante la secuencia INIT (posiblemente de OpenCV):", initProcessError);
+                postMessage({ type: 'initComplete', payload: { success: false, error: `Error general en INIT: ${initProcessError.message || String(initProcessError)}` } });
+            }
+            break;
+
+        case 'processFrame':
+            if (!alprInstance || !alprInstance.isInitialized) {
+                self.postMessage({ type: 'frameProcessed', frameId: frameId, error: `Worker no listo: ALPR init=${alprInstance?.isInitialized}`, results: [] });
                 return;
             }
-        }
-
-        // Ahora, configurar globales (ORT y esperar inicialización de CV)
-        const globalsOk = await setupGlobals();
-        if (globalsOk) {
-            const alprSuccess = await initializeAlpr(payload.detectorModel, payload.ocrModel);
-            self.postMessage({ type: 'initComplete', success: alprSuccess, error: alprSuccess ? null : 'Fallo al inicializar ALPR en worker (después de setupGlobals).' });
-        } else {
-            self.postMessage({ type: 'initComplete', success: false, error: 'Fallo en setupGlobals (ORT o CV no listos/inicializados).' });
-        }
-
-    } else if (type === 'processFrame') {
-        if (!alprInstance || !cvReady || !ortReady) {
-            self.postMessage({
-                type: 'frameProcessed',
-                frameId: frameId,
-                error: `Worker no está listo para procesar: ALPR instancia=${!!alprInstance}, CV listo=${cvReady}, ORT listo=${ortReady}.`,
-                results: []
-            });
-            return;
-        }
-
-        const imageData = payload; // Es un objeto ImageData
-        let imageMat = null;
-        try {
-            imageMat = cv.matFromImageData(imageData); // Convertir ImageData a cv.Mat
-            const alprResults = await alprInstance.predict(imageMat); // predict espera cv.Mat
-
-            self.postMessage({
-                type: 'frameProcessed',
-                frameId: frameId,
-                results: alprResults,
-            });
-        } catch (error) {
-            console.error(`ALPR Worker: Error procesando frame ${frameId}:`, error, error.stack);
-            self.postMessage({ type: 'frameProcessed', frameId: frameId, error: error.message, results: [] });
-        } finally {
-            if (imageMat && !imageMat.isDeleted()) {
-                imageMat.delete(); // Liberar memoria de la Mat de OpenCV
+            const imageData = payload;
+            let imageMat = null;
+            try {
+                if (!cv || !cv.matFromImageData) throw new Error("cv.matFromImageData no disponible.");
+                imageMat = cv.matFromImageData(imageData);
+                const startTime = performance.now();
+                const alprResults = await alprInstance.predict(imageMat);
+                const endTime = performance.now();
+                self.postMessage({ type: 'frameProcessed', frameId: frameId, results: alprResults, time: endTime - startTime });
+            } catch (error) {
+                console.error(`ALPR Worker: Error procesando frame ${frameId}:`, error, error.stack);
+                self.postMessage({ type: 'frameProcessed', frameId: frameId, error: error.message, results: [] });
+            } finally {
+                if (imageMat && !imageMat.isDeleted()) imageMat.delete();
             }
-        }
+            break;
+        default:
+            console.warn("ALPR Worker: Mensaje tipo desconocido:", type);
     }
 };
-
 console.info("ALPR Worker: Script evaluado. Esperando mensajes.");

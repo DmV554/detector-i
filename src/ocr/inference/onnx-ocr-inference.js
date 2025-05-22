@@ -1,191 +1,174 @@
-// onnx-ocr-inference.js
+// src/ocr/inference/onnx-ocr-inference.js
 
-/**
- * @fileoverview Orquestador de inferencia OCR usando ONNX Runtime Web.
- */
-
-// Ensure ONNX Runtime is loaded (usually via CDN)
-
-// Importar los módulos JS que creamos antes
-import { getOcrModel } from './hub.js';         // Ajusta la ruta si es necesario
-import { AVAILABLE_OCR_MODELS } from './hub.js'; // Para validar nombres si es necesario
-import { OCR_DEFAULT_CONFIG } from './config.js'; // O OCR_CONFIGS si usas el diccionario
-import { OCRUtils } from './process.js';     // Donde definiste loadImageAndConvertToGrayscale, etc.
-
-/**
- * Helper interno para procesar diversas fuentes de entrada de imagen.
- * Convierte las fuentes a un array de cv.Mat en escala de grises.
- * Requiere que OpenCV (cv) esté cargado globalmente y listo.
- *
- * @param {HTMLImageElement | HTMLCanvasElement | ImageData | cv.Mat | Array<HTMLImageElement | HTMLCanvasElement | ImageData | cv.Mat>} source - Fuente(s) de imagen.
- * @returns {Promise<cv.Mat[]>} Un array de objetos cv.Mat (escala de grises).
- * @throws {Error} Si OpenCV no está listo o no se pueden cargar imágenes válidas.
- */
-async function _loadImageInputs(source) {
-    // 'cv' debería estar disponible globalmente en el worker.
-    if (typeof cv === 'undefined' || typeof cv.Mat === 'undefined') {
-        throw new Error("OpenCV.js no está listo o no se encontró globalmente (cv).");
-    }
-    // const cv = window.cv; // INCORRECTO en worker
-
-    const sources = Array.isArray(source) ? source : [source];
-    const mats = [];
-    const matsToDelete = [];
-
-    console.debug(`OCR _loadImageInputs: Procesando ${sources.length} fuente(s)...`);
-
-    for (let i = 0; i < sources.length; i++) {
-        const src = sources[i];
-        let grayMat = null;
-        try {
-            if (src instanceof cv.Mat) {
-                if (src.empty()) {
-                    console.warn(`OCR _loadImageInputs: Índice ${i}: cv.Mat vacío.`);
-                    continue;
-                }
-                if (src.channels() === 1) {
-                    grayMat = src.clone(); // Clonar para evitar modificar el original si es pasado
-                    matsToDelete.push(grayMat);
-                } else {
-                    grayMat = new cv.Mat();
-                    matsToDelete.push(grayMat);
-                    if (src.channels() === 3) cv.cvtColor(src, grayMat, cv.COLOR_RGB2GRAY);
-                    else if (src.channels() === 4) cv.cvtColor(src, grayMat, cv.COLOR_RGBA2GRAY);
-                    else throw new Error(`Número de canales no soportado en cv.Mat: ${src.channels()}`);
-                }
-            } else if (src instanceof OffscreenCanvas || (typeof HTMLCanvasElement !== 'undefined' && src instanceof HTMLCanvasElement) || (typeof HTMLImageElement !== 'undefined' && src instanceof HTMLImageElement) || src instanceof ImageData) {
-                 grayMat = OCRUtils.loadImageAndConvertToGrayscale(src);
-                 if (grayMat) {
-                      matsToDelete.push(grayMat);
-                 }
-            } else {
-                console.warn(`OCR _loadImageInputs: Índice ${i}: Tipo no soportado: ${src ? src.constructor.name : src}.`);
-            }
-            if (grayMat && !grayMat.empty()) {
-                mats.push(grayMat);
-            }
-        } catch (error) {
-            console.error(`OCR _loadImageInputs: Error procesando fuente ${i}:`, error);
-            if (grayMat && matsToDelete.includes(grayMat) && !grayMat.isDeleted()) {
-                grayMat.delete();
-                const indexToRemove = matsToDelete.indexOf(grayMat);
-                if(indexToRemove > -1) matsToDelete.splice(indexToRemove, 1);
-            }
-        }
-    }
-
-    // Devolver solo los mats que no son el original, los otros se borran aquí.
-    // O el llamador se encarga de borrar todos. Por ahora, devolvemos todos los procesados.
-    // Es crucial que el llamador (OnnxOcrRecognizer.run) borre estos mats.
-    return mats; // Estos son los mats grises, listos para preprocesar.
-}
-
+import { OCRUtils } from './process.js'; // Tus funciones de pre/postprocesamiento
 
 export class OnnxOcrRecognizer {
     session = null;
-    config = null;
-    modelName = null;
-    providers = ['wasm'];
-    sessionOptions = undefined;
+    modelConfig = null; // Para guardar la configuración específica del modelo OCR (max_plate_slots, alphabet, etc.)
+    modelPath = null;   // Ruta al archivo .onnx
+    configPath = null;  // Ruta al archivo JSON de configuración del modelo OCR
+    executionProviders = ['wasm']; // Default, se sobrescribirá desde opciones
     isInitialized = false;
 
+    /**
+     * @param {object} options
+     * @param {string} options.modelPath - Ruta completa al archivo .onnx del modelo OCR.
+     * @param {string} options.configPath - Ruta completa al archivo JSON de configuración del modelo OCR.
+     * @param {string[]} [options.executionProviders=['wasm']] - Proveedores de ejecución para ONNX.
+     * @param {object} [options.sessionOptions] - Opciones adicionales para la sesión ONNX.
+     */
     constructor(options = {}) {
-        this.providers = options.providers || ['wasm']; // Aunque en el worker, se configurará via ort.env
-        this.sessionOptions = options.sessionOptions;
-        console.log(`OnnxOcrRecognizer (fast-plate-ocr-js): Creado. Proveedores solicitados: ${this.providers.join(', ')}`);
+        if (!options.modelPath || !options.configPath) {
+            throw new Error("OnnxOcrRecognizer: 'modelPath' y 'configPath' son requeridos en las opciones.");
+        }
+        this.modelPath = options.modelPath;
+        this.configPath = options.configPath;
+        this.executionProviders = options.executionProviders || ['wasm'];
+        this.sessionOptions = options.sessionOptions; // Opciones adicionales de sesión (ej. logSeverityLevel)
+        console.log(`OnnxOcrRecognizer: Creado. Modelo: ${this.modelPath}, Config: ${this.configPath}, EPs: ${this.executionProviders.join(', ')}`);
     }
 
-    async initialize(modelName) {
-        this.isInitialized = false;
-        this.modelName = modelName;
-        console.log(`OnnxOcrRecognizer: Inicializando con modelo: ${modelName}...`);
+    async initialize() {
+        if (this.isInitialized) {
+            console.log("OnnxOcrRecognizer ya está inicializado.");
+            return;
+        }
+        console.log(`OnnxOcrRecognizer: Inicializando con modelo: ${this.modelPath} y config: ${this.configPath}...`);
 
         try {
-            if (typeof ort === 'undefined') { // Verificar que ort esté disponible globalmente
-                throw new Error("ONNX Runtime (ort) no está disponible globalmente en el worker.");
+            if (typeof ort === 'undefined') {
+                throw new Error("ONNX Runtime (ort) no está disponible globalmente.");
             }
-            if (!AVAILABLE_OCR_MODELS[modelName]) {
-                throw new Error(`Modelo OCR '${modelName}' no en AVAILABLE_OCR_MODELS.`);
+
+            // 1. Cargar el archivo JSON de configuración específico del modelo OCR
+            const configResponse = await fetch(this.configPath);
+            if (!configResponse.ok) {
+                throw new Error(`Error HTTP ${configResponse.status} cargando config OCR desde ${this.configPath}`);
             }
-            this.config = OCR_DEFAULT_CONFIG; // Asumiendo una config global
-            if (!this.config) {
-                throw new Error(`Configuración no encontrada para modelo: ${modelName}`);
+            this.modelConfig = await configResponse.json();
+            if (!this.modelConfig || !this.modelConfig.alphabet || !this.modelConfig.max_plate_slots) {
+                throw new Error(`Configuración OCR inválida o incompleta en ${this.configPath}. Faltan 'alphabet' o 'max_plate_slots'.`);
             }
-            const modelResponse = await getOcrModel(modelName);
+            console.log("OnnxOcrRecognizer: Configuración del modelo OCR cargada:", this.modelConfig);
+
+
+            // 2. Cargar el modelo ONNX
+            //    getOcrModel de hub.js ya no se usa. Se carga directamente el ArrayBuffer.
+            const modelResponse = await fetch(this.modelPath);
+            if (!modelResponse.ok) {
+                throw new Error(`Error HTTP ${modelResponse.status} cargando modelo ONNX desde ${this.modelPath}`);
+            }
             const modelArrayBuffer = await modelResponse.arrayBuffer();
 
-            // Las sessionOptions se construyen aquí, usando this.sessionOptions si existen
             const finalSessionOptions = {
-                executionProviders: this.providers, // Esto podría tomarse de ort.env.wasm.executionProviders si se prefiere una config global del worker
+                executionProviders: this.executionProviders,
                 logSeverityLevel: 2, // 0:verbose, 1:info, 2:warning, 3:error, 4:fatal
-                ...(this.sessionOptions || {}) // Mezclar con opciones pasadas
+                ...(this.sessionOptions || {}) // Mezclar con opciones pasadas si existen
             };
             console.log("OnnxOcrRecognizer: Creando sesión ONNX con opciones:", finalSessionOptions);
-            this.session = await ort.InferenceSession.create(modelArrayBuffer, finalSessionOptions);
 
-            console.log("OnnxOcrRecognizer: Sesión ONNX creada. Proveedores usados:", this.session.providers);
+            this.session = await ort.InferenceSession.create(modelArrayBuffer, finalSessionOptions);
+            console.log("OnnxOcrRecognizer: Sesión ONNX creada. Proveedores efectivos usados:", this.session.providers);
             this.isInitialized = true;
+
         } catch (error) {
-            console.error(`OnnxOcrRecognizer: Fallo al inicializar para ${modelName}:`, error);
+            console.error(`OnnxOcrRecognizer: Fallo al inicializar:`, error, error.stack);
             this.session = null;
-            this.config = null;
-            this.modelName = null;
+            this.modelConfig = null;
             this.isInitialized = false;
-            throw error;
+            throw error; // Re-lanzar para que el llamador lo maneje
         }
     }
 
+    /**
+     * Ejecuta la inferencia OCR.
+     * @param {cv.Mat | HTMLImageElement | HTMLCanvasElement | ImageData | OffscreenCanvas} source - Imagen de entrada.
+     * @param {boolean} [returnConfidence=false] - Si se deben devolver las confianzas.
+     * @returns {Promise<[string[], (number[][]|undefined)] | string[]>}
+     * Si returnConfidence es true, devuelve [arrayDeTextos, arrayDeConfianzasPorSlot].
+     * Sino, devuelve arrayDeTextos.
+     */
     async run(source, returnConfidence = false) {
-        if (!this.isInitialized || !this.session || !this.config) {
-            throw new Error("OnnxOcrRecognizer: No inicializado.");
+        if (!this.isInitialized || !this.session || !this.modelConfig) {
+            throw new Error("OnnxOcrRecognizer: No inicializado o configuración de modelo no cargada.");
         }
-        // 'cv' debería estar disponible globalmente en el worker
         if (typeof cv === 'undefined' || !cv.imread) {
             throw new Error("OpenCV.js (cv) no está listo en OnnxOcrRecognizer.run.");
         }
 
-        console.log("OnnxOcrRecognizer: Iniciando run...");
-        let inputMats = [];
+        console.debug("OnnxOcrRecognizer: Iniciando run...");
+        let grayMat = null; // El mat en escala de grises
+        let preprocessedInput = null;
+
         try {
-            inputMats = await _loadImageInputs(source); // Devuelve array de cv.Mat grises
-            if (inputMats.length === 0) {
-                console.warn("OnnxOcrRecognizer: Ninguna imagen válida de _loadImageInputs. Devolviendo vacío.");
-                return returnConfidence ? [[], []] : [];
+            // 1. Cargar y convertir a escala de grises
+            // _loadImageInputs procesaba un array, aquí procesamos una sola imagen.
+            // loadImageAndConvertToGrayscale espera una sola fuente y devuelve un solo Mat gris.
+            grayMat = OCRUtils.loadImageAndConvertToGrayscale(source);
+            if (!grayMat || grayMat.empty()) {
+                console.warn("OnnxOcrRecognizer: No se pudo obtener un Mat gris válido de la fuente.");
+                return returnConfidence ? [[], undefined] : [];
             }
 
-            const preprocessed = OCRUtils.preprocessImage(inputMats, this.config.img_height, this.config.img_width);
+            // 2. Preprocesar para el modelo (redimensionar, normalizar, formatear tensor)
+            //    Pasamos [grayMat] porque preprocessOcrInputs espera un array.
+            preprocessedInput = OCRUtils.preprocessOcrInputs(
+                [grayMat], // Espera un array de Mats
+                this.modelConfig.img_height,
+                this.modelConfig.img_width,
+                this.modelConfig.expected_input_channels || 1 // Tomar de config o default a 1
+            );
 
-            inputMats.forEach(mat => {
-                if (mat && !mat.isDeleted()) mat.delete();
-            }); // Borrar mats grises
-            inputMats = [];
-
+            // 3. Crear tensor de entrada
             const inputName = this.session.inputNames[0];
             if (!inputName) throw new Error("No se pudo determinar nombre de entrada del modelo OCR.");
-            // Asegúrate que 'ort' aquí sea el global del worker.
-            const inputTensor = new ort.Tensor('uint8', preprocessed.data, preprocessed.shape);
-            const feeds = {[inputName]: inputTensor};
+            const inputTensor = new ort.Tensor('float32', preprocessedInput.data, preprocessedInput.shape);
+            const feeds = { [inputName]: inputTensor };
+
+            // 4. Ejecutar inferencia
             const results = await this.session.run(feeds);
             const outputName = this.session.outputNames[0];
             if (!outputName) throw new Error("No se pudo determinar nombre de salida del modelo OCR.");
             const outputTensor = results[outputName];
-            const finalResult = OCRUtils.postprocessOutput(
-                outputTensor.data,
-                outputTensor.dims,
-                this.config.max_plate_slots,
-                this.config.alphabet,
+
+            // 5. Postprocesar salida
+            const finalResult = OCRUtils.postprocessOcrOutput(
+                outputTensor.data,      // Float32Array o similar
+                outputTensor.dims,      // shape
+                this.modelConfig.max_plate_slots,
+                this.modelConfig.alphabet,
                 returnConfidence
             );
-            console.log("OnnxOcrRecognizer: Run completado.");
-            return finalResult;
+
+            console.debug("OnnxOcrRecognizer: Run completado.");
+            // La salida de postprocessOcrOutput ya es [plates] o [plates, probabilities]
+            // Tu DefaultOCR espera un objeto { textArray: [...], probabilities: { mean: ...}}
+            // Así que necesitamos adaptar esto.
+            if (returnConfidence) {
+                const plates = finalResult[0];
+                const probArrays = finalResult[1]; // Array de arrays de probabilidades
+                // Calcular una confianza media por placa si es necesario, o pasar el array
+                const confidenceMeans = probArrays ? probArrays.map(pArr => pArr.reduce((a,b)=>a+b,0) / (pArr.length || 1)) : [];
+                 // Devolver en el formato que espera DefaultOCR
+                return {
+                    textArray: plates, // plates es un array de strings, ej. ["ABC123"]
+                    probabilities: { mean: () => (confidenceMeans[0] || 0) } // Tomar la media de la primera (y única) placa
+                };
+
+            } else {
+                const plates = finalResult; // plates es un array de strings
+                 return {
+                    textArray: plates,
+                    probabilities: { mean: () => 0 } // O alguna estructura de confianza placeholder
+                };
+            }
+
         } catch (error) {
             console.error("Error en OnnxOcrRecognizer.run:", error);
-            if (inputMats && inputMats.length > 0) {
-                inputMats.forEach(mat => {
-                    if (mat && !mat.isDeleted()) mat.delete();
-                });
-            }
-            throw error;
+            throw error; // Re-lanzar para que DefaultOCR lo maneje
+        } finally {
+            if (grayMat && !grayMat.isDeleted()) grayMat.delete();
+            // preprocessedInput.data es un Float32Array, no necesita delete.
         }
     }
 }
